@@ -115,6 +115,7 @@ body::after {
 
 .controls {
   position: relative;
+  z-index: 100;
   animation: panelSlide 0.5s var(--ease-out-expo) 0.08s both;
 }
 

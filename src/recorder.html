@@ -1,0 +1,49 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Guide-Recorder</title>
+    <link rel="stylesheet" href="./recorder.css" />
+  </head>
+  <body>
+    <main class="dock">
+      <h1>Recorder Dock</h1>
+
+      <label>Capture source
+        <select id="sourceSelect"></select>
+      </label>
+
+      <label class="inline">
+        <input id="autoOpenEditor" type="checkbox" checked />
+        Open browser editor after save
+      </label>
+
+      <label class="inline">
+        <input id="hideNativeCursor" type="checkbox" checked />
+        Hide real cursor in capture (use post cursor)
+      </label>
+
+      <label class="inline">
+        <input id="useSelectedArea" type="checkbox" />
+        Use selected area
+      </label>
+
+      <div class="row">
+        <button id="selectAreaBtn">Select Area</button>
+        <div id="areaInfo" class="small">Area: not selected</div>
+      </div>
+
+      <div class="row">
+        <button id="refreshBtn">Refresh</button>
+        <button id="startBtn">Record</button>
+        <button id="stopBtn" disabled>Stop + Save</button>
+      </div>
+
+      <div id="status" class="status">Idle</div>
+    </main>
+
+    <script src="./recorder.js" defer></script>
+  </body>
+</html>
+

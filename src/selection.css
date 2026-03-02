@@ -1,0 +1,38 @@
+﻿* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+body { background: rgba(0, 0, 0, 0.28); font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; }
+
+.overlay { position: relative; width: 100vw; height: 100vh; cursor: crosshair; user-select: none; }
+.selection {
+  position: absolute;
+  border: 2px solid #4ce4b9;
+  background: rgba(76, 228, 185, 0.12);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.32);
+}
+.hidden { display: none; }
+
+.handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #ffffff;
+  border: 1px solid #1b2e47;
+  border-radius: 2px;
+}
+.handle.nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.handle.ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.handle.sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.handle.se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+
+.hud {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  background: rgba(14, 19, 32, 0.8);
+  color: #e8edf7;
+  border: 1px solid #31405a;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  max-width: 680px;
+}

@@ -1,0 +1,92 @@
+﻿:root {
+  --bg: #11151e;
+  --panel: #1a2232;
+  --stroke: #2f3b53;
+  --text: #ecf1fb;
+  --muted: #9ca8bc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 10px;
+  background: radial-gradient(circle at 20% 0%, #25304a, #11151e 46%);
+  color: var(--text);
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  overflow: hidden;
+}
+
+.dock {
+  background: linear-gradient(150deg, #1a2232, #151c2b);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  padding: 12px;
+  width: 100%;
+  overflow: hidden;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+label.inline {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+select,
+button {
+  border: 1px solid #344462;
+  background: #283a5d;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+select {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
+}
+
+button:disabled {
+  opacity: 0.45;
+}
+
+.status {
+  margin-top: 10px;
+  color: #74e2bf;
+  white-space: pre-line;
+  font-size: 0.85rem;
+  max-height: 140px;
+  overflow: auto;
+}
+
+.small {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

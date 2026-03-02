@@ -1,0 +1,17 @@
+﻿{
+  "name": "guide-recorder-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop recorder for Guide-Recorder-like capture with global cursor timeline",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^37.2.0"
+  },
+  "optionalDependencies": {
+    "uiohook-napi": "^1.5.4"
+  }
+}
+

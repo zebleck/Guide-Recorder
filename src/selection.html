@@ -1,0 +1,21 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Select Capture Area</title>
+    <link rel="stylesheet" href="./selection.css" />
+  </head>
+  <body>
+    <div id="overlay" class="overlay">
+      <div id="selection" class="selection hidden">
+        <div class="handle nw" data-handle="nw"></div>
+        <div class="handle ne" data-handle="ne"></div>
+        <div class="handle sw" data-handle="sw"></div>
+        <div class="handle se" data-handle="se"></div>
+      </div>
+      <div id="hud" class="hud">Drag to select area. Drag inside to move. Use corner handles to resize. Enter confirm, Esc cancel.</div>
+    </div>
+    <script src="./selection.js" defer></script>
+  </body>
+</html>

@@ -114,6 +114,11 @@ select {
   opacity: 0.5;
 }
 
+.icon-btn:focus,
+.icon-btn:focus-visible {
+  outline: none;
+}
+
 .icon {
   width: 16px;
   height: 16px;

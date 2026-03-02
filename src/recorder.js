@@ -151,6 +151,20 @@ async function stopRecording() {
   handleStopResult(result);
 }
 
+function onDockKeyDown(e) {
+  if (e.key !== "Escape") return;
+  if (isRecording) return;
+  if (!useSelectedArea && !selectedArea) return;
+  e.preventDefault();
+  selectedArea = null;
+  useSelectedArea = false;
+  setSelectAreaButtonState(false);
+  if (document.activeElement === selectAreaBtn) {
+    selectAreaBtn.blur();
+  }
+  syncAreaPreview();
+}
+
 selectAreaBtn.addEventListener("click", () => {
   toggleArea().catch(() => {});
 });
@@ -164,8 +178,10 @@ stopBtn.addEventListener("click", () => {
 window.recorderApi.onRecordingStopped((result) => {
   handleStopResult(result);
 });
+window.addEventListener("keydown", onDockKeyDown);
 
 window.addEventListener("beforeunload", () => {
+  window.removeEventListener("keydown", onDockKeyDown);
   window.recorderApi.setAreaPreview({ enabled: false, bounds: null }).catch(() => {});
   if (isRecording) {
     window.recorderApi.stopRecording().catch(() => {});

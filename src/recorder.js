@@ -1,20 +1,13 @@
 const sourceSelect = document.getElementById("sourceSelect");
 const selectAreaBtn = document.getElementById("selectAreaBtn");
 const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
+const closeBtn = document.getElementById("closeBtn");
 const dockEl = document.querySelector(".dock");
 
 let isRecording = false;
 let selectedArea = null;
 let useSelectedArea = false;
 let fittedOnce = false;
-
-function setStopButtonState(isActive) {
-  stopBtn.classList.toggle("armed", Boolean(isActive));
-  const label = isActive ? "Stop and save recording" : "Recording stopped";
-  stopBtn.title = label;
-  stopBtn.setAttribute("aria-label", label);
-}
 
 function setSelectAreaButtonState(enabled) {
   selectAreaBtn.classList.toggle("area-on", Boolean(enabled));
@@ -59,8 +52,6 @@ function shortDiag(raw) {
 function applyStoppedUiState() {
   isRecording = false;
   startBtn.disabled = false;
-  stopBtn.disabled = true;
-  setStopButtonState(false);
 }
 
 function handleStopResult(result) {
@@ -115,8 +106,6 @@ async function startRecording() {
 
   isRecording = true;
   startBtn.disabled = true;
-  stopBtn.disabled = false;
-  setStopButtonState(true);
 }
 
 async function toggleArea() {
@@ -144,13 +133,6 @@ async function toggleArea() {
   syncAreaPreview();
 }
 
-async function stopRecording() {
-  if (!isRecording) return;
-  stopBtn.disabled = true;
-  const result = await window.recorderApi.stopRecording();
-  handleStopResult(result);
-}
-
 function onDockKeyDown(e) {
   if (e.key !== "Escape") return;
   if (isRecording) return;
@@ -171,8 +153,8 @@ selectAreaBtn.addEventListener("click", () => {
 startBtn.addEventListener("click", () => {
   startRecording().catch(() => {});
 });
-stopBtn.addEventListener("click", () => {
-  stopRecording().catch(() => {});
+closeBtn.addEventListener("click", () => {
+  window.recorderApi.quitApp().catch(() => {});
 });
 
 window.recorderApi.onRecordingStopped((result) => {

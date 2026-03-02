@@ -1,0 +1,87 @@
+:root {
+  --bg: rgba(13, 19, 29, 0.9);
+  --stroke: rgba(77, 99, 133, 0.78);
+  --text: #ecf1fb;
+  --pause: #4d7bc6;
+  --stop: #c2465a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.dock {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--stroke);
+  border-radius: 11px;
+  background: var(--bg);
+  padding: 5px;
+  -webkit-app-region: drag;
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  -webkit-app-region: no-drag;
+}
+
+.pause {
+  background: color-mix(in srgb, var(--pause) 58%, #1b2434);
+}
+
+.pause.is-paused {
+  background: color-mix(in srgb, #d69c43 64%, #1b2434);
+}
+
+.stop {
+  background: color-mix(in srgb, var(--stop) 64%, #1b2434);
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: rgba(171, 196, 239, 0.55);
+}
+
+.icon-btn:disabled {
+  opacity: 0.6;
+}
+
+.bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bars span {
+  width: 4px;
+  height: 14px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.square {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: currentColor;
+}

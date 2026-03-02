@@ -106,8 +106,9 @@ function formatClock(sec) {
 }
 
 function syncPlaybackUi() {
-  const dur = Number(videoEl.duration || 0);
-  const cur = Number(videoEl.currentTime || 0);
+  const dur = effectiveDurationSec();
+  const curNow = Number(videoEl.currentTime || 0);
+  const cur = dur > 0 ? Math.min(curNow, dur) : curNow;
 
   if (!isSeeking) {
     if (dur > 0) seekBar.value = String(Math.round((cur / dur) * 1000));
@@ -119,6 +120,25 @@ function syncPlaybackUi() {
 
 function nowMs() {
   return performance.now();
+}
+
+function effectiveDurationSecFor(sourceDuration) {
+  const videoDuration = Number(sourceDuration || 0);
+  const projectDuration = Number(project.durationSec || 0);
+  if (videoDuration > 0 && projectDuration > 0) return Math.min(videoDuration, projectDuration);
+  return Math.max(videoDuration, projectDuration, 0);
+}
+
+function effectiveDurationSec() {
+  return effectiveDurationSecFor(videoEl.duration);
+}
+
+function clampPlaybackToEffectiveDuration() {
+  const maxSec = effectiveDurationSec();
+  if (!videoEl.src || maxSec <= 0) return;
+  if (Number(videoEl.currentTime || 0) <= maxSec) return;
+  videoEl.currentTime = maxSec;
+  videoEl.pause();
 }
 
 function recMs() {
@@ -401,6 +421,7 @@ function drawClickBursts(currentMs, zoomViewport, contentRect) {
   const life = 460;
   for (const evt of project.events) {
     if (evt.type !== "mouse_down") continue;
+    if (evt.inFrame === false) continue;
     const age = currentMs - evt.t;
     if (age < 0 || age > life) continue;
     const rawPos = eventToCanvasPosition(evt);
@@ -534,16 +555,21 @@ function eventToCanvasPosition(evt) {
 
 function pointerAt(currentMs) {
   let latest = null;
+  let inFrame = false;
   for (const evt of project.events) {
     if (evt.t > currentMs) break;
     if (evt.type !== "mouse_move" && evt.type !== "mouse_down" && evt.type !== "mouse_up") continue;
-    if (evt.inFrame === false) continue;
+    if (evt.inFrame === false) {
+      inFrame = false;
+      continue;
+    }
     const pos = eventToCanvasPosition(evt);
     if (!pos) continue;
     latest = pos;
+    inFrame = true;
   }
 
-  if (!latest) {
+  if (!latest || !inFrame) {
     const rect = videoContentRect();
     return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   }
@@ -593,16 +619,21 @@ function exportEventToPosition(evt, width, height) {
 
 function pointerAtForExport(currentMs, width, height) {
   let latest = null;
+  let inFrame = false;
   for (const evt of project.events) {
     if (evt.t > currentMs) break;
     if (evt.type !== "mouse_move" && evt.type !== "mouse_down" && evt.type !== "mouse_up") continue;
-    if (evt.inFrame === false) continue;
+    if (evt.inFrame === false) {
+      inFrame = false;
+      continue;
+    }
     const pos = exportEventToPosition(evt, width, height);
     if (!pos) continue;
     latest = pos;
+    inFrame = true;
   }
 
-  if (!latest) return { inFrame: false, x: width / 2, y: height / 2 };
+  if (!latest || !inFrame) return { inFrame: false, x: width / 2, y: height / 2 };
   return { inFrame: true, x: latest.x, y: latest.y };
 }
 
@@ -628,6 +659,7 @@ function drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport) {
   const life = 460;
   for (const evt of project.events) {
     if (evt.type !== "mouse_down") continue;
+    if (evt.inFrame === false) continue;
     const age = currentMs - evt.t;
     if (age < 0 || age > life) continue;
 
@@ -901,6 +933,8 @@ async function exportFinalVideo() {
     if (width < 2 || height < 2) {
       throw new Error("Invalid video dimensions for export");
     }
+    const targetDurationSec = effectiveDurationSecFor(exportVideo.duration);
+    const targetDurationMs = targetDurationSec > 0 ? targetDurationSec * 1000 : 0;
 
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = width;
@@ -937,10 +971,17 @@ async function exportFinalVideo() {
     let done = false;
     const drawLoop = () => {
       const currentMs = Math.max(0, exportVideo.currentTime * 1000);
-      renderExportFrame(exportCtx, exportVideo, currentMs, width, height);
+      const clampedMs = targetDurationMs > 0 ? Math.min(currentMs, targetDurationMs) : currentMs;
+      renderExportFrame(exportCtx, exportVideo, clampedMs, width, height);
 
-      if (exportVideo.ended) {
+      if ((targetDurationMs > 0 && clampedMs >= targetDurationMs) || exportVideo.ended) {
         done = true;
+        try {
+          exportVideo.pause();
+          if (targetDurationSec > 0) exportVideo.currentTime = targetDurationSec;
+        } catch {
+          // ignore
+        }
         if (recorder.state !== "inactive") recorder.stop();
         return;
       }
@@ -1450,7 +1491,10 @@ videoEl.addEventListener("pause", () => {
   syncPlaybackUi();
 });
 videoEl.addEventListener("seeked", renderOverlay);
-videoEl.addEventListener("timeupdate", syncPlaybackUi);
+videoEl.addEventListener("timeupdate", () => {
+  clampPlaybackToEffectiveDuration();
+  syncPlaybackUi();
+});
 videoEl.addEventListener("loadedmetadata", () => {
   syncPreviewStageAspect();
   fitCanvasToVideo();
@@ -1475,7 +1519,7 @@ playPauseBtn.addEventListener("click", async () => {
 
 seekBar.addEventListener("input", () => {
   if (!videoEl.src) return;
-  const dur = Number(videoEl.duration || 0);
+  const dur = effectiveDurationSec();
   if (!dur) return;
   isSeeking = true;
   const p = Number(seekBar.value) / 1000;

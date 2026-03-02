@@ -14,6 +14,7 @@ let mainWindow = null;
 let selectorWindow = null;
 let areaPreviewWindow = null;
 let countdownWindow = null;
+let recordingControlsWindow = null;
 let selectorState = null;
 let activeSession = null;
 let editorServer = null;
@@ -178,6 +179,81 @@ function closeAreaPreviewWindow() {
   areaPreviewWindow = null;
 }
 
+function closeRecordingControlsWindow() {
+  if (!recordingControlsWindow || recordingControlsWindow.isDestroyed()) {
+    recordingControlsWindow = null;
+    return;
+  }
+  recordingControlsWindow.close();
+  recordingControlsWindow = null;
+}
+
+function recordingStatePayload() {
+  return {
+    isRecording: Boolean(activeSession?.ffmpegProcess),
+    isPaused: Boolean(activeSession?.isPaused),
+  };
+}
+
+function notifyRecordingState() {
+  const payload = recordingStatePayload();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("recorder:state", payload);
+  }
+  if (recordingControlsWindow && !recordingControlsWindow.isDestroyed()) {
+    recordingControlsWindow.webContents.send("recorder:state", payload);
+  }
+}
+
+function openRecordingControlsWindow(bounds) {
+  const v = virtualDesktopBounds();
+  closeRecordingControlsWindow();
+
+  const width = 112;
+  const height = 44;
+  const cx = Math.round(Number(bounds?.x || v.x) + Number(bounds?.width || v.width) / 2);
+  let x = Math.round(cx - width / 2);
+  let y = Math.round(Number(bounds?.y || v.y) - height - 10);
+  if (y < v.y + 8) y = Math.round(Number(bounds?.y || v.y) + 10);
+  x = Math.max(v.x + 8, Math.min(v.x + v.width - width - 8, x));
+  y = Math.max(v.y + 8, Math.min(v.y + v.height - height - 8, y));
+
+  recordingControlsWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    focusable: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, "recording-controls-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  recordingControlsWindow.__guideRecorderControls = true;
+  recordingControlsWindow.setMenuBarVisibility(false);
+  recordingControlsWindow.setAlwaysOnTop(true, "screen-saver");
+  try {
+    recordingControlsWindow.setContentProtection(true);
+  } catch {
+    // Best effort; unsupported on some platforms/runtime combinations.
+  }
+  recordingControlsWindow.loadFile(path.join(__dirname, "recording-controls.html"));
+  recordingControlsWindow.webContents.once("did-finish-load", () => {
+    notifyRecordingState();
+  });
+  recordingControlsWindow.on("closed", () => {
+    recordingControlsWindow = null;
+  });
+}
+
 function openAreaPreviewWindow(bounds, recording = false) {
   const v = virtualDesktopBounds();
   closeAreaPreviewWindow();
@@ -307,7 +383,18 @@ function mapDisplayFromSource(sourceId) {
 function pushSessionEvent(evt) {
   if (!activeSession) return;
   if (!Number.isFinite(activeSession.startPerf)) return;
-  activeSession.events.push({ t: performance.now() - activeSession.startPerf, ...evt });
+  if (activeSession.isPaused) return;
+  activeSession.events.push({ t: sessionElapsedMs(activeSession), ...evt });
+}
+
+function sessionElapsedMs(session) {
+  if (!session || !Number.isFinite(session.startPerf)) return 0;
+  const now = performance.now();
+  const pausedAccum = Number(session.totalPausedMs || 0);
+  const pausedActive = session.isPaused && Number.isFinite(session.pausedAtPerf)
+    ? Math.max(0, now - Number(session.pausedAtPerf))
+    : 0;
+  return Math.max(0, now - Number(session.startPerf) - pausedAccum - pausedActive);
 }
 
 function startCursorSampler() {
@@ -753,6 +840,10 @@ ipcMain.handle("recorder:fitWindow", async (_evt, payload) => {
   return { ok: true, width, height };
 });
 
+ipcMain.handle("recorder:getState", async () => {
+  return recordingStatePayload();
+});
+
 ipcMain.handle("recorder:pickArea", async () => {
   if (selectorWindow) {
     selectorWindow.focus();
@@ -767,6 +858,35 @@ ipcMain.handle("recorder:pickArea", async () => {
     }
     selectorState.pendingResolve = resolve;
   });
+});
+
+ipcMain.handle("recorder:togglePause", async () => {
+  if (!activeSession?.ffmpegProcess) {
+    return { ok: false, reason: "No active recording" };
+  }
+  const proc = activeSession.ffmpegProcess;
+  if (!proc.stdin || proc.stdin.destroyed) {
+    return { ok: false, reason: "Pause control is unavailable for this session" };
+  }
+  try {
+    proc.stdin.write("p\n");
+    if (!activeSession.isPaused) {
+      activeSession.isPaused = true;
+      activeSession.pausedAtPerf = performance.now();
+      pushSessionEvent({ type: "mouse_move", inFrame: false });
+    } else {
+      const pausedAt = Number(activeSession.pausedAtPerf || 0);
+      if (pausedAt > 0) {
+        activeSession.totalPausedMs = Number(activeSession.totalPausedMs || 0) + Math.max(0, performance.now() - pausedAt);
+      }
+      activeSession.isPaused = false;
+      activeSession.pausedAtPerf = null;
+    }
+    notifyRecordingState();
+    return { ok: true, isPaused: activeSession.isPaused };
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) };
+  }
 });
 
 ipcMain.handle("recorder:setAreaPreview", async (_evt, payload) => {
@@ -794,6 +914,19 @@ ipcMain.handle("recorder:setAreaPreview", async (_evt, payload) => {
     height: Number(b.height),
   }, recording);
   return { ok: true, visible: true };
+});
+
+ipcMain.handle("recorder:quit", async () => {
+  try {
+    if (activeSession?.ffmpegProcess) {
+      activeSession.autoOpenEditor = false;
+      await stopRecordingInternal();
+    }
+  } catch {
+    // Continue quit path even if stop/save fails.
+  }
+  app.quit();
+  return { ok: true };
 });
 
 ipcMain.handle("selector:getContext", async () => {
@@ -829,6 +962,7 @@ ipcMain.on("selector:cancel", () => {
 
 async function stopRecordingInternal() {
   if (!activeSession || !activeSession.ffmpegProcess) {
+    closeRecordingControlsWindow();
     const result = { ok: false, reason: "No active recording" };
     notifyRecordingStopped(result);
     if (mainWindow) {
@@ -839,6 +973,7 @@ async function stopRecordingInternal() {
   }
 
   const session = activeSession;
+  closeRecordingControlsWindow();
   closeCountdownWindow();
   stopCursorSampler();
   stopUiohook();
@@ -862,7 +997,7 @@ async function stopRecordingInternal() {
     return result;
   }
 
-  const durationSec = (performance.now() - session.startPerf) / 1000;
+  const durationSec = sessionElapsedMs(session) / 1000;
 
   const projectJson = {
     recordedMimeType: "video/mp4",
@@ -963,6 +1098,9 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       ffmpegProcess: null,
       ffmpegStderr: "",
       usingUiohook: false,
+      isPaused: false,
+      pausedAtPerf: null,
+      totalPausedMs: 0,
     };
 
     closeAreaPreviewWindow();
@@ -975,6 +1113,8 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
     if (hasSelection) {
       openAreaPreviewWindow(activeSession.captureBounds, true);
     }
+    openRecordingControlsWindow(activeSession.captureBounds);
+    notifyRecordingState();
 
     const usingUiohook = startUiohookIfAvailable();
     activeSession.usingUiohook = usingUiohook;
@@ -1013,6 +1153,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         const diagnostics = (activeSession.ffmpegStderr || "").trim().slice(-4000);
         stopCursorSampler();
         stopUiohook();
+        closeRecordingControlsWindow();
         activeSession = null;
         if (mainWindow) {
           mainWindow.show();
@@ -1050,6 +1191,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         const diagnostics = (activeSession.ffmpegStderr || "").trim().slice(-4000);
         stopCursorSampler();
         stopUiohook();
+        closeRecordingControlsWindow();
         activeSession = null;
         if (mainWindow) {
           mainWindow.show();
@@ -1083,6 +1225,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       stopHotkeyRegistered,
     };
   } catch (err) {
+    closeRecordingControlsWindow();
     closeCountdownWindow();
     if (activeSession) {
       stopCursorSampler();
@@ -1111,11 +1254,13 @@ app.whenReady().then(async () => {
   }
 });
 app.on("will-quit", () => {
+  closeRecordingControlsWindow();
   closeCountdownWindow();
   closeAreaPreviewWindow();
   globalShortcut.unregisterAll();
 });
 app.on("window-all-closed", () => {
+  closeRecordingControlsWindow();
   closeCountdownWindow();
   closeAreaPreviewWindow();
   if (process.platform !== "darwin") app.quit();

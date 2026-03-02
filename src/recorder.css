@@ -92,6 +92,10 @@ select {
   background: color-mix(in srgb, var(--stop) 60%, #1b2434);
 }
 
+.icon-btn.close {
+  background: color-mix(in srgb, #7a4450 55%, #1b2434);
+}
+
 .icon-btn.area-on {
   border-color: #30415f;
   box-shadow: none;

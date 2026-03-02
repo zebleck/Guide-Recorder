@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("recorderApi", {
   fitWindow: (payload) => ipcRenderer.invoke("recorder:fitWindow", payload),
   startRecording: (payload) => ipcRenderer.invoke("recorder:startRecording", payload),
   stopRecording: () => ipcRenderer.invoke("recorder:stopRecording"),
+  quitApp: () => ipcRenderer.invoke("recorder:quit"),
   setAreaPreview: (payload) => ipcRenderer.invoke("recorder:setAreaPreview", payload),
   onRecordingStopped: (callback) => {
     if (typeof callback !== "function") return () => {};

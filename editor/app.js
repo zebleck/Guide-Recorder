@@ -19,6 +19,7 @@ const effectEditorTitle = document.getElementById("effectEditorTitle");
 const effectEditorFields = document.getElementById("effectEditorFields");
 const effectEditorCloseBtn = document.getElementById("effectEditorCloseBtn");
 const effectEditorDeleteBtn = document.getElementById("effectEditorDeleteBtn");
+const effectEditorDuplicateBtn = document.getElementById("effectEditorDuplicateBtn");
 const cursorSettingsBtn = document.getElementById("cursorSettingsBtn");
 const cursorPopover = document.getElementById("cursorPopover");
 const cursorPopoverCloseBtn = document.getElementById("cursorPopoverCloseBtn");
@@ -56,7 +57,7 @@ let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
 const MIN_EFFECT_DURATION_SEC = 0.2;
-const EFFECT_RESIZE_EDGE_PX = 12;
+const EFFECT_RESIZE_EDGE_PX = 20;
 
 const timelineHoverSec = {
   zoom: 0,
@@ -273,6 +274,12 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
         <label>Y (%)<input data-key="yPct" type="number" min="0" max="100" step="1" value="${Math.round(Number(effect.yPct || 0))}" /></label>
       </div>
       <label>Text<input data-key="value" type="text" value="${String(effect.value || "").replace(/"/g, "&quot;")}" /></label>
+      <div class="grid2">
+        <label>Font Size (px)<input data-key="fontSize" type="number" min="8" max="200" step="1" value="${Math.round(Number(effect.fontSize || 22))}" /></label>
+        <label>Color<input data-key="color" type="color" value="${effect.color || "#ffffff"}" /></label>
+        <label>Background<input data-key="bgColor" type="color" value="${effect.bgColor || "#000000"}" /></label>
+        <label>BG Opacity<input data-key="bgOpacity" type="number" min="0" max="100" step="5" value="${Math.round(Number(effect.bgOpacity ?? 68))}" /></label>
+      </div>
     `;
   }
 
@@ -282,8 +289,8 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       if (!active) return;
       const key = input.dataset.key;
       if (!key) return;
-      if (key === "value") {
-        active.value = String(input.value || "");
+      if (key === "value" || key === "color" || key === "bgColor") {
+        active[key] = String(input.value || "");
       } else {
         active[key] = Number(input.value || 0);
       }
@@ -712,6 +719,15 @@ function drawHeldButtons(currentMs) {
   }
 }
 
+function textBgRgba(t) {
+  const hex = t.bgColor || "#000000";
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const a = (Number(t.bgOpacity ?? 68) / 100).toFixed(2);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
 function drawTextOverlays(currentMs) {
   const tSec = currentMs / 1000;
   for (const t of project.texts) {
@@ -719,14 +735,16 @@ function drawTextOverlays(currentMs) {
 
     const x = (t.xPct / 100) * canvas.width;
     const y = (t.yPct / 100) * canvas.height;
+    const fontSize = Number(t.fontSize || 22);
 
     const pad = 8;
-    ctx.font = "bold 22px Segoe UI";
+    ctx.font = `bold ${fontSize}px Segoe UI`;
     const w = ctx.measureText(t.value).width + pad * 2;
+    const h = fontSize + pad * 2;
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
-    ctx.fillRect(x - pad, y - 24, w, 34);
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = textBgRgba(t);
+    ctx.fillRect(x - pad, y - fontSize - pad + 4, w, h);
+    ctx.fillStyle = t.color || "#ffffff";
     ctx.fillText(t.value, x, y);
   }
 }
@@ -957,13 +975,15 @@ function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
 
     const x = (t.xPct / 100) * width;
     const y = (t.yPct / 100) * height;
+    const fontSize = Number(t.fontSize || 22);
     const pad = 8;
 
-    renderCtx.font = "bold 22px Segoe UI";
+    renderCtx.font = `bold ${fontSize}px Segoe UI`;
     const w = renderCtx.measureText(t.value).width + pad * 2;
-    renderCtx.fillStyle = "rgba(0, 0, 0, 0.68)";
-    renderCtx.fillRect(x - pad, y - 24, w, 34);
-    renderCtx.fillStyle = "#ffffff";
+    const h = fontSize + pad * 2;
+    renderCtx.fillStyle = textBgRgba(t);
+    renderCtx.fillRect(x - pad, y - fontSize - pad + 4, w, h);
+    renderCtx.fillStyle = t.color || "#ffffff";
     renderCtx.fillText(t.value, x, y);
   }
 }
@@ -1625,6 +1645,10 @@ function addEffectAt(kind, atSec) {
     xPct: 12,
     yPct: 12,
     value: "Text",
+    fontSize: 22,
+    color: "#ffffff",
+    bgColor: "#000000",
+    bgOpacity: 68,
   };
   project.texts.push(t);
   sortEffects();
@@ -1665,8 +1689,6 @@ timelineSurface.addEventListener("click", (e) => {
     }
     return;
   }
-  const handleEl = e.target.closest(".timeline-handle");
-  if (handleEl) return;
   const segEl = e.target.closest(".timeline-segment");
   if (segEl) {
     if (suppressNextSegmentClick) {
@@ -1709,8 +1731,6 @@ timelineSurface.addEventListener("pointerdown", (e) => {
   const segEl = e.target.closest(".timeline-segment");
   if (!segEl) return;
   const handleEl = e.target.closest(".timeline-handle");
-  e.preventDefault();
-  e.stopPropagation();
   const kind = segEl.dataset.kind;
   const index = Number(segEl.dataset.index || -1);
   const side = (handleEl && (handleEl.dataset.side === "left" || handleEl.dataset.side === "right"))
@@ -1796,6 +1816,21 @@ effectEditorCloseBtn.addEventListener("click", () => {
 
 effectEditorDeleteBtn.addEventListener("click", () => {
   deleteSelectedEffect();
+});
+
+effectEditorDuplicateBtn.addEventListener("click", () => {
+  if (!editingEffect) return;
+  const { kind, effect } = editingEffect;
+  const clone = JSON.parse(JSON.stringify(effect));
+  const shiftSec = 0.5;
+  clone.startSec = Number(clone.startSec || 0) + shiftSec;
+  clone.endSec = Number(clone.endSec || 0) + shiftSec;
+  const list = effectsFor(kind);
+  list.push(clone);
+  sortEffects();
+  const newIndex = list.indexOf(clone);
+  hideEffectEditor();
+  openEffectEditor(kind, newIndex);
 });
 
 if (cursorSettingsBtn) {

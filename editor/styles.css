@@ -18,6 +18,8 @@ body {
   background: radial-gradient(circle at 20% 0%, #1c2031 0%, #101114 45%);
   color: var(--text);
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  overflow: hidden;
+  height: 100vh;
 }
 
 .app {
@@ -25,7 +27,9 @@ body {
   margin: 0 auto;
   padding: 16px;
   display: grid;
+  grid-template-rows: auto 1fr;
   gap: 14px;
+  height: 100vh;
 }
 
 .panel {
@@ -67,6 +71,30 @@ h3 {
   white-space: nowrap;
 }
 
+.controls {
+  position: relative;
+}
+
+.cursor-popover {
+  position: absolute;
+  right: 14px;
+  top: 86px;
+  width: 360px;
+  border: 1px solid #31415f;
+  border-radius: 10px;
+  background: #0f1523;
+  padding: 10px;
+  z-index: 20;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.42);
+}
+
+.cursor-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
 button,
 .file-input {
   border: 1px solid #2f3950;
@@ -100,11 +128,26 @@ button:hover:not(:disabled),
 .preview-stage {
   position: relative;
   width: 100%;
+  margin: 0 auto;
   aspect-ratio: 16 / 9;
   border: 1px solid var(--stroke);
   border-radius: 10px;
   overflow: hidden;
   background: #0b0c10;
+}
+
+.preview-wrap {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.preview-viewport {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
 }
 
 #previewVideo,
@@ -116,7 +159,7 @@ button:hover:not(:disabled),
 }
 
 .preview-controls {
-  margin-top: 10px;
+  margin-top: 0;
   display: grid;
   grid-template-columns: auto 1fr auto;
   gap: 10px;
@@ -135,11 +178,12 @@ button:hover:not(:disabled),
 }
 
 .effects-timeline {
-  margin-top: 12px;
+  margin-top: 0;
   border: 1px solid #2a3041;
   border-radius: 10px;
   background: #0f131d;
   padding: 8px;
+  position: relative;
 }
 
 .timeline-header {
@@ -231,6 +275,7 @@ button:hover:not(:disabled),
   font-size: 0.72rem;
   line-height: 16px;
   cursor: pointer;
+  user-select: none;
   transition: transform 120ms ease, box-shadow 140ms ease, filter 140ms ease;
 }
 
@@ -263,14 +308,49 @@ button:hover:not(:disabled),
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  padding-right: 18px;
+}
+
+.timeline-remove-btn {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  background: rgba(18, 23, 35, 0.72);
+  color: #f1f4ff;
+  font-size: 9px;
+  line-height: 12px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, background 120ms ease;
+  z-index: 4;
+}
+
+.timeline-segment:hover .timeline-remove-btn,
+.timeline-segment.selected .timeline-remove-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.timeline-remove-btn:hover {
+  background: #5a2f35;
 }
 
 .timeline-handle {
   position: absolute;
   top: 0;
-  width: 7px;
+  width: 12px;
   height: 100%;
   cursor: ew-resize;
+  z-index: 5;
 }
 
 .timeline-handle.left {
@@ -324,11 +404,15 @@ button:hover:not(:disabled),
 }
 
 .effect-editor {
-  margin-top: 10px;
+  position: absolute;
+  margin-top: 0;
   border: 1px solid #2c3a53;
   border-radius: 8px;
   background: #0c121d;
   padding: 8px;
+  width: 300px;
+  z-index: 12;
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.45);
 }
 
 .effect-editor-head {
@@ -397,12 +481,6 @@ button:hover:not(:disabled),
   cursor: crosshair;
 }
 
-.editor-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-}
-
 .grid2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -434,8 +512,3 @@ input {
   background: #5a2f35;
 }
 
-@media (min-width: 980px) {
-  .editor-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}

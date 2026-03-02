@@ -16,6 +16,7 @@
         <div class="row row-toolbar">
           <button id="exportFinalBtn" disabled>Export Final Video</button>
           <button id="saveProjectBtn" disabled>Download Project JSON</button>
+          <button id="cursorSettingsBtn" type="button">Cursor Settings</button>
           <label class="file-input">
             Load Project JSON
             <input id="loadProjectInput" type="file" accept="application/json" />
@@ -25,14 +26,38 @@
             <input id="loadVideoInput" type="file" accept="video/webm,video/mp4,video/*" />
           </label>
         </div>
+        <div id="cursorPopover" class="cursor-popover hidden">
+          <div class="cursor-popover-head">
+            <strong>Cursor Calibration</strong>
+            <button id="cursorPopoverCloseBtn" class="ghost-btn" type="button">x</button>
+          </div>
+          <div class="grid2">
+            <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
+            <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
+          </div>
+          <div class="row">
+            <label class="file-input">
+              Cursor Texture
+              <input id="cursorTextureInput" type="file" accept="image/png,image/webp,image/jpeg,image/svg+xml,image/*" />
+            </label>
+            <button id="cursorTextureClearBtn" type="button">Clear Texture</button>
+          </div>
+          <div class="grid2">
+            <label>Hotspot X (px)<input id="cursorHotspotX" type="number" step="1" value="0" min="0" /></label>
+            <label>Hotspot Y (px)<input id="cursorHotspotY" type="number" step="1" value="0" min="0" /></label>
+          </div>
+          <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
+        </div>
 
       </section>
 
       <section class="panel preview-wrap">
-        <div class="preview-stage" id="previewStage">
-          <video id="previewVideo" playsinline></video>
-          <canvas id="overlayCanvas"></canvas>
-          <div id="liveKeyPill" class="key-pill hidden"></div>
+        <div class="preview-viewport" id="previewViewport">
+          <div class="preview-stage" id="previewStage">
+            <video id="previewVideo" playsinline></video>
+            <canvas id="overlayCanvas"></canvas>
+            <div id="liveKeyPill" class="key-pill hidden"></div>
+          </div>
         </div>
         <div class="preview-controls">
           <button id="playPauseBtn">Play</button>
@@ -74,31 +99,6 @@
         </div>
       </section>
 
-      <section class="panel editor">
-        <h2>Cursor Calibration</h2>
-
-        <div class="editor-grid">
-          <div>
-            <div class="grid2">
-              <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
-              <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
-            </div>
-            <div class="row">
-              <label class="file-input">
-                Cursor Texture
-                <input id="cursorTextureInput" type="file" accept="image/png,image/webp,image/jpeg,image/svg+xml,image/*" />
-              </label>
-              <button id="cursorTextureClearBtn" type="button">Clear Texture</button>
-            </div>
-            <div class="grid2">
-              <label>Hotspot X (px)<input id="cursorHotspotX" type="number" step="1" value="0" min="0" /></label>
-              <label>Hotspot Y (px)<input id="cursorHotspotY" type="number" step="1" value="0" min="0" /></label>
-            </div>
-            <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
-            <p class="muted">Use this when overlay cursor is shifted from the real cursor in playback.</p>
-          </div>
-        </div>
-      </section>
     </main>
 
     <script src="./app.js" defer></script>

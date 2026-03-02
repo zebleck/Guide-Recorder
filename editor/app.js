@@ -19,11 +19,18 @@ const effectEditorTitle = document.getElementById("effectEditorTitle");
 const effectEditorFields = document.getElementById("effectEditorFields");
 const effectEditorCloseBtn = document.getElementById("effectEditorCloseBtn");
 const effectEditorDeleteBtn = document.getElementById("effectEditorDeleteBtn");
+const cursorSettingsBtn = document.getElementById("cursorSettingsBtn");
+const cursorPopover = document.getElementById("cursorPopover");
+const cursorPopoverCloseBtn = document.getElementById("cursorPopoverCloseBtn");
 
 const videoEl = document.getElementById("previewVideo");
 const canvas = document.getElementById("overlayCanvas");
 const ctx = canvas.getContext("2d");
+const previewWrapEl = document.querySelector(".preview-wrap");
+const previewViewportEl = document.getElementById("previewViewport");
 const previewStageEl = document.getElementById("previewStage");
+const previewControlsEl = document.querySelector(".preview-controls");
+const effectsTimelineEl = document.getElementById("effectsTimeline");
 const keyPill = document.getElementById("liveKeyPill");
 
 const cursorOffsetXInput = document.getElementById("cursorOffsetX");
@@ -49,6 +56,7 @@ let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
 const MIN_EFFECT_DURATION_SEC = 0.2;
+const EFFECT_RESIZE_EDGE_PX = 12;
 
 const timelineHoverSec = {
   zoom: 0,
@@ -57,6 +65,8 @@ const timelineHoverSec = {
 
 let editingEffect = null;
 let resizingEffect = null;
+let effectEditorAnchorPoint = null;
+let suppressNextSegmentClick = false;
 
 const project = {
   recordedBlob: null,
@@ -178,9 +188,42 @@ function effectsFor(kind) {
 
 function hideEffectEditor() {
   editingEffect = null;
+  effectEditorAnchorPoint = null;
   effectEditor.classList.add("hidden");
   effectEditorFields.innerHTML = "";
   renderEffectsTimeline();
+}
+
+function positionEffectEditor(anchorEl = null, anchorPoint = null) {
+  if (!effectEditor || effectEditor.classList.contains("hidden")) return;
+  const host = document.getElementById("effectsTimeline");
+  if (!host) return;
+  const hostRect = host.getBoundingClientRect();
+  const editorRect = effectEditor.getBoundingClientRect();
+
+  let centerX = hostRect.left + hostRect.width / 2;
+  let topY = hostRect.top + 6;
+  if (anchorPoint && Number.isFinite(anchorPoint.clientX) && Number.isFinite(anchorPoint.clientY)) {
+    centerX = anchorPoint.clientX;
+    topY = anchorPoint.clientY - editorRect.height - 8;
+  } else if (anchorEl) {
+    const a = anchorEl.getBoundingClientRect();
+    centerX = a.left + a.width / 2;
+    topY = a.top - editorRect.height - 10;
+  }
+
+  const minLeft = hostRect.left + 6;
+  const maxLeft = hostRect.right - editorRect.width - 6;
+  const leftPx = Math.max(minLeft, Math.min(maxLeft, centerX - editorRect.width / 2));
+  const topPx = Math.min(hostRect.bottom - editorRect.height - 6, topY);
+  effectEditor.style.left = `${Math.round(leftPx - hostRect.left)}px`;
+  effectEditor.style.top = `${Math.round(topPx - hostRect.top)}px`;
+}
+
+function toggleCursorPopover(show) {
+  if (!cursorPopover) return;
+  if (show) cursorPopover.classList.remove("hidden");
+  else cursorPopover.classList.add("hidden");
 }
 
 function clampEffectBounds(effect) {
@@ -190,10 +233,23 @@ function clampEffectBounds(effect) {
   effect.endSec = end;
 }
 
-function openEffectEditor(kind, index) {
+function resizeSideFromPoint(segEl, clientX) {
+  if (!segEl) return null;
+  const rect = segEl.getBoundingClientRect();
+  const localX = clientX - rect.left;
+  const edgePx = Math.min(EFFECT_RESIZE_EDGE_PX, Math.max(8, rect.width * 0.25));
+  if (localX <= edgePx) return "left";
+  if (localX >= rect.width - edgePx) return "right";
+  return null;
+}
+
+function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
   const list = effectsFor(kind);
   const effect = list[index];
   if (!effect) return;
+  effectEditorAnchorPoint = anchorPoint && Number.isFinite(anchorPoint.clientX) && Number.isFinite(anchorPoint.clientY)
+    ? { clientX: anchorPoint.clientX, clientY: anchorPoint.clientY }
+    : null;
   editingEffect = { kind, index, effect };
   renderEffectsTimeline();
   effectEditor.classList.remove("hidden");
@@ -245,6 +301,35 @@ function openEffectEditor(kind, index) {
       syncPlaybackUi();
     });
   }
+
+  requestAnimationFrame(() => {
+    const freshAnchor = anchorEl && anchorEl.isConnected
+      ? anchorEl
+      : timelineSurface.querySelector(`.timeline-segment[data-kind="${kind}"][data-index="${editingEffect.index}"]`);
+    positionEffectEditor(freshAnchor || null, effectEditorAnchorPoint);
+  });
+}
+
+function deleteEffect(kind, index) {
+  const list = effectsFor(kind);
+  if (!list || index < 0 || index >= list.length) return false;
+  const effect = list[index];
+  list.splice(index, 1);
+  if (editingEffect && editingEffect.kind === kind && editingEffect.effect === effect) {
+    hideEffectEditor();
+  } else {
+    renderEffectsTimeline();
+  }
+  syncPlaybackUi();
+  return true;
+}
+
+function deleteSelectedEffect() {
+  if (!editingEffect) return false;
+  const list = effectsFor(editingEffect.kind);
+  const idx = list.indexOf(editingEffect.effect);
+  if (idx < 0) return false;
+  return deleteEffect(editingEffect.kind, idx);
 }
 
 function buildTrackSegments(kind, trackEl, durSec) {
@@ -261,6 +346,7 @@ function buildTrackSegments(kind, trackEl, durSec) {
       seg.classList.add("selected");
     }
     seg.innerHTML = `<span class="timeline-segment-label">${label}</span>
+      <button class="timeline-remove-btn" type="button" aria-label="Remove effect" title="Remove effect">x</button>
       <span class="timeline-handle left" data-side="left"></span>
       <span class="timeline-handle right" data-side="right"></span>`;
     trackEl.appendChild(seg);
@@ -308,8 +394,18 @@ function fitCanvasToVideo() {
 function syncPreviewStageAspect() {
   const vw = Number(videoEl.videoWidth || 0);
   const vh = Number(videoEl.videoHeight || 0);
-  if (!previewStageEl || vw <= 0 || vh <= 0) return;
+  if (!previewStageEl || !previewViewportEl || vw <= 0 || vh <= 0) return;
+
+  // Fit stage strictly inside viewport rect (contain; never clip, never overlap controls).
+  const viewportW = Math.max(1, Number(previewViewportEl.clientWidth || 1));
+  const viewportH = Math.max(1, Number(previewViewportEl.clientHeight || 1));
+  const scale = Math.min(viewportW / vw, viewportH / vh);
+  const targetW = Math.max(1, Math.floor(vw * scale));
+  const targetH = Math.max(1, Math.floor(vh * scale));
+
   previewStageEl.style.aspectRatio = `${vw} / ${vh}`;
+  previewStageEl.style.width = `${targetW}px`;
+  previewStageEl.style.height = `${targetH}px`;
 }
 
 function videoContentRect() {
@@ -424,6 +520,8 @@ function renderCursorPreviewCanvas() {
 function persistCursorPrefsToLocalStorage() {
   try {
     const payload = {
+      cursorOffsetX: Number(project.cursorOffsetX || 0),
+      cursorOffsetY: Number(project.cursorOffsetY || 0),
       cursorTextureDataUrl: project.cursorTextureDataUrl || "",
       cursorTextureName: project.cursorTextureName || "",
       cursorHotspotX: Number(project.cursorHotspotX || 0),
@@ -446,9 +544,13 @@ async function loadCursorPrefsFromLocalStorage() {
 
   try {
     const data = JSON.parse(raw);
+    project.cursorOffsetX = Number(data.cursorOffsetX || 0);
+    project.cursorOffsetY = Number(data.cursorOffsetY || 0);
     project.cursorHotspotX = Number(data.cursorHotspotX || 0);
     project.cursorHotspotY = Number(data.cursorHotspotY || 0);
     project.cursorTextureName = String(data.cursorTextureName || "");
+    cursorOffsetXInput.value = String(project.cursorOffsetX);
+    cursorOffsetYInput.value = String(project.cursorOffsetY);
     syncCursorHotspotInputs();
     await loadCursorTextureFromDataUrl(
       String(data.cursorTextureDataUrl || ""),
@@ -459,7 +561,7 @@ async function loadCursorPrefsFromLocalStorage() {
   }
 }
 
-async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
+async function loadCursorTextureFromDataUrl(dataUrl, name = "", shouldPersist = true) {
   if (!dataUrl) {
     cursorTextureImage = null;
     project.cursorTextureDataUrl = "";
@@ -468,7 +570,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
     project.cursorHotspotY = 0;
     syncCursorHotspotInputs();
     renderCursorPreviewCanvas();
-    persistCursorPrefsToLocalStorage();
+    if (shouldPersist) persistCursorPrefsToLocalStorage();
     return;
   }
 
@@ -484,7 +586,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
-  persistCursorPrefsToLocalStorage();
+  if (shouldPersist) persistCursorPrefsToLocalStorage();
 }
 
 async function readFileAsDataUrl(file) {
@@ -1252,7 +1354,11 @@ async function applyLoadedProjectData(data) {
   cursorOffsetXInput.value = String(project.cursorOffsetX);
   cursorOffsetYInput.value = String(project.cursorOffsetY);
   syncCursorHotspotInputs();
-  await loadCursorTextureFromDataUrl(String(data.cursorTextureDataUrl || ""), project.cursorTextureName);
+  await loadCursorTextureFromDataUrl(
+    String(data.cursorTextureDataUrl || ""),
+    project.cursorTextureName,
+    false
+  );
   sortEffects();
   renderEffectsTimeline();
 }
@@ -1329,9 +1435,11 @@ loadVideoInput.addEventListener("change", async (e) => {
 exportFinalBtn.addEventListener("click", exportFinalVideo);
 cursorOffsetXInput.addEventListener("input", () => {
   project.cursorOffsetX = Number(cursorOffsetXInput.value || 0);
+  persistCursorPrefsToLocalStorage();
 });
 cursorOffsetYInput.addEventListener("input", () => {
   project.cursorOffsetY = Number(cursorOffsetYInput.value || 0);
+  persistCursorPrefsToLocalStorage();
 });
 cursorHotspotXInput.addEventListener("input", () => {
   project.cursorHotspotX = Number(cursorHotspotXInput.value || 0);
@@ -1405,6 +1513,8 @@ videoEl.addEventListener("loadedmetadata", () => {
 videoEl.addEventListener("ended", syncPlaybackUi);
 window.addEventListener("resize", fitCanvasToVideo);
 window.addEventListener("resize", renderEffectsTimeline);
+window.addEventListener("resize", syncPreviewStageAspect);
+window.addEventListener("resize", () => requestAnimationFrame(syncPreviewStageAspect));
 
 playPauseBtn.addEventListener("click", async () => {
   if (!videoEl.src) return;
@@ -1492,7 +1602,6 @@ function addEffectAt(kind, atSec) {
     project.zooms.push(z);
     sortEffects();
     renderEffectsTimeline();
-    openEffectEditor("zoom", project.zooms.indexOf(z));
     return;
   }
   const t = {
@@ -1505,7 +1614,6 @@ function addEffectAt(kind, atSec) {
   project.texts.push(t);
   sortEffects();
   renderEffectsTimeline();
-  openEffectEditor("text", project.texts.indexOf(t));
 }
 
 zoomTrack.addEventListener("pointermove", (e) => onLanePointerMove("zoom", e));
@@ -1529,14 +1637,31 @@ textAddBtn.addEventListener("click", (e) => {
 });
 
 timelineSurface.addEventListener("click", (e) => {
+  const removeBtn = e.target.closest(".timeline-remove-btn");
+  if (removeBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const segEl = removeBtn.closest(".timeline-segment");
+    if (!segEl) return;
+    const kind = segEl.dataset.kind;
+    const index = Number(segEl.dataset.index || -1);
+    if ((kind === "zoom" || kind === "text") && index >= 0) {
+      deleteEffect(kind, index);
+    }
+    return;
+  }
   const handleEl = e.target.closest(".timeline-handle");
   if (handleEl) return;
   const segEl = e.target.closest(".timeline-segment");
   if (segEl) {
+    if (suppressNextSegmentClick) {
+      suppressNextSegmentClick = false;
+      return;
+    }
     const kind = segEl.dataset.kind;
     const index = Number(segEl.dataset.index || -1);
     if ((kind === "zoom" || kind === "text") && index >= 0) {
-      openEffectEditor(kind, index);
+      openEffectEditor(kind, index, segEl, { clientX: e.clientX, clientY: e.clientY });
     }
     return;
   }
@@ -1554,19 +1679,21 @@ timelineSurface.addEventListener("click", (e) => {
 });
 
 timelineSurface.addEventListener("pointerdown", (e) => {
-  const handleEl = e.target.closest(".timeline-handle");
-  if (!handleEl) return;
   const segEl = e.target.closest(".timeline-segment");
   if (!segEl) return;
+  const handleEl = e.target.closest(".timeline-handle");
   e.preventDefault();
   e.stopPropagation();
   const kind = segEl.dataset.kind;
   const index = Number(segEl.dataset.index || -1);
-  const side = handleEl.dataset.side;
+  const side = (handleEl && (handleEl.dataset.side === "left" || handleEl.dataset.side === "right"))
+    ? handleEl.dataset.side
+    : resizeSideFromPoint(segEl, e.clientX);
   const list = effectsFor(kind);
   const effect = list[index];
   const trackEl = kind === "zoom" ? zoomTrack : textTrack;
   if (!effect || !trackEl || (side !== "left" && side !== "right")) return;
+  suppressNextSegmentClick = true;
   resizingEffect = {
     kind,
     effect,
@@ -1594,10 +1721,33 @@ window.addEventListener("pointermove", (e) => {
   sortEffects();
   renderEffectsTimeline();
   syncPlaybackUi();
+  document.body.style.cursor = "ew-resize";
 });
 
 window.addEventListener("pointerup", () => {
+  if (resizingEffect) {
+    suppressNextSegmentClick = true;
+  }
   resizingEffect = null;
+  document.body.style.cursor = "";
+});
+
+timelineSurface.addEventListener("pointermove", (e) => {
+  if (resizingEffect) {
+    timelineSurface.style.cursor = "ew-resize";
+    return;
+  }
+  const segEl = e.target.closest(".timeline-segment");
+  if (!segEl) {
+    timelineSurface.style.cursor = "pointer";
+    return;
+  }
+  const side = resizeSideFromPoint(segEl, e.clientX);
+  timelineSurface.style.cursor = side ? "ew-resize" : "pointer";
+});
+
+timelineSurface.addEventListener("pointerleave", () => {
+  if (!resizingEffect) timelineSurface.style.cursor = "pointer";
 });
 
 effectEditorCloseBtn.addEventListener("click", () => {
@@ -1605,15 +1755,49 @@ effectEditorCloseBtn.addEventListener("click", () => {
 });
 
 effectEditorDeleteBtn.addEventListener("click", () => {
-  if (!editingEffect) return;
-  const list = effectsFor(editingEffect.kind);
-  const idx = list.indexOf(editingEffect.effect);
-  if (idx < 0) return;
-  list.splice(idx, 1);
-  hideEffectEditor();
-  sortEffects();
-  renderEffectsTimeline();
-  syncPlaybackUi();
+  deleteSelectedEffect();
+});
+
+if (cursorSettingsBtn) {
+  cursorSettingsBtn.addEventListener("click", () => {
+    const shouldShow = cursorPopover?.classList.contains("hidden");
+    toggleCursorPopover(Boolean(shouldShow));
+  });
+}
+if (cursorPopoverCloseBtn) {
+  cursorPopoverCloseBtn.addEventListener("click", () => {
+    toggleCursorPopover(false);
+  });
+}
+
+window.addEventListener("pointerdown", (e) => {
+  const target = e.target;
+  if (!target) return;
+  if (cursorPopover && !cursorPopover.classList.contains("hidden")) {
+    if (!cursorPopover.contains(target) && !cursorSettingsBtn?.contains(target)) {
+      toggleCursorPopover(false);
+    }
+  }
+  if (effectEditor && !effectEditor.classList.contains("hidden")) {
+    const clickedSeg = target.closest?.(".timeline-segment");
+    const clickedHandle = target.closest?.(".timeline-handle");
+    if (!effectEditor.contains(target) && !clickedSeg && !clickedHandle) {
+      hideEffectEditor();
+    }
+  }
+});
+
+window.addEventListener("resize", () => {
+  positionEffectEditor(null, effectEditorAnchorPoint);
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Delete") return;
+  const target = e.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+  if (deleteSelectedEffect()) {
+    e.preventDefault();
+  }
 });
 
 setStatus("Idle. Load recording JSON/video to begin editing.");
@@ -1621,9 +1805,12 @@ refreshActionButtons();
 syncPlaybackUi();
 renderCursorPreviewCanvas();
 renderEffectsTimeline();
-loadCursorPrefsFromLocalStorage().finally(() => {
-  tryDesktopAutoLoad();
-});
+requestAnimationFrame(syncPreviewStageAspect);
+
+(async () => {
+  await tryDesktopAutoLoad();
+  await loadCursorPrefsFromLocalStorage();
+})();
 
 
 

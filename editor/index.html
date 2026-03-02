@@ -29,7 +29,6 @@
           </label>
         </div>
 
-        <div class="status" id="status">Idle</div>
       </section>
 
       <section class="panel preview-wrap">
@@ -51,23 +50,38 @@
           <div class="timeline-surface" id="timelineSurface">
             <div class="timeline-lane">
               <span class="timeline-name">Zoom</span>
-              <div class="timeline-track" id="zoomTrack"></div>
+              <div class="timeline-track" id="zoomTrack">
+                <span id="zoomGhost" class="timeline-ghost zoom hidden"></span>
+                <button id="zoomAddBtn" class="lane-add-btn" type="button" title="Add zoom">+</button>
+              </div>
             </div>
             <div class="timeline-lane">
               <span class="timeline-name">Text</span>
-              <div class="timeline-track" id="textTrack"></div>
+              <div class="timeline-track" id="textTrack">
+                <span id="textGhost" class="timeline-ghost text hidden"></span>
+                <button id="textAddBtn" class="lane-add-btn" type="button" title="Add text">+</button>
+              </div>
             </div>
             <div class="timeline-playhead" id="timelinePlayhead"></div>
+          </div>
+          <div id="effectEditor" class="effect-editor hidden">
+            <div class="effect-editor-head">
+              <strong id="effectEditorTitle">Edit</strong>
+              <button id="effectEditorCloseBtn" class="ghost-btn" type="button">x</button>
+            </div>
+            <div id="effectEditorFields" class="effect-editor-fields"></div>
+            <div class="effect-editor-actions">
+              <button id="effectEditorDeleteBtn" type="button" class="remove-btn">Delete</button>
+            </div>
           </div>
         </div>
       </section>
 
       <section class="panel editor">
-        <h2>Edit Timeline</h2>
+        <h2>Cursor Calibration</h2>
 
         <div class="editor-grid">
           <div>
-            <h3>Cursor Calibration</h3>
             <div class="grid2">
               <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
               <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
@@ -85,40 +99,6 @@
             </div>
             <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
             <p class="muted">Use this when overlay cursor is shifted from the real cursor in playback.</p>
-          </div>
-
-          <div>
-            <h3>Add Zoom Segment</h3>
-            <div class="grid2">
-              <label>Start (s)<input id="zoomStart" type="number" min="0" step="0.1" value="0" /></label>
-              <label>End (s)<input id="zoomEnd" type="number" min="0" step="0.1" value="3" /></label>
-              <label>Scale<input id="zoomScale" type="number" min="1" step="0.1" value="1.8" /></label>
-              <label>Smooth (ms)<input id="zoomEase" type="number" min="0" step="10" value="180" /></label>
-            </div>
-            <button id="addZoomBtn">Add Zoom</button>
-          </div>
-
-          <div>
-            <h3>Add Text Overlay</h3>
-            <div class="grid2">
-              <label>Start (s)<input id="textStart" type="number" min="0" step="0.1" value="0" /></label>
-              <label>End (s)<input id="textEnd" type="number" min="0" step="0.1" value="2" /></label>
-              <label>X (%)<input id="textX" type="number" min="0" max="100" step="1" value="12" /></label>
-              <label>Y (%)<input id="textY" type="number" min="0" max="100" step="1" value="12" /></label>
-            </div>
-            <label>Text<input id="textValue" type="text" value="Click here" /></label>
-            <button id="addTextBtn">Add Text</button>
-          </div>
-        </div>
-
-        <div class="list-wrap">
-          <div>
-            <h3>Zoom Segments</h3>
-            <ul id="zoomList" class="list"></ul>
-          </div>
-          <div>
-            <h3>Text Overlays</h3>
-            <ul id="textList" class="list"></ul>
           </div>
         </div>
       </section>

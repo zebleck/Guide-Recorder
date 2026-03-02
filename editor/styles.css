@@ -56,6 +56,10 @@ h3 {
   margin-top: 10px;
 }
 
+.controls .row {
+  flex-wrap: nowrap;
+}
+
 button,
 .file-input {
   border: 1px solid #2f3950;
@@ -175,9 +179,41 @@ button:hover:not(:disabled),
   position: relative;
 }
 
+.lane-add-btn {
+  position: absolute;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin-top: 0;
+  margin-left: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: #35538a;
+  border: 1px solid #6382bc;
+  color: #eef3ff;
+  font-size: 13px;
+  line-height: 15px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.92);
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 3;
+}
+
+.timeline-track:hover .lane-add-btn {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.lane-add-btn.blocked {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
 .timeline-segment {
   position: absolute;
-  top: 6px;
+  top: 5px;
   height: 22px;
   border-radius: 6px;
   border: 1px solid transparent;
@@ -187,6 +223,55 @@ button:hover:not(:disabled),
   padding: 2px 6px;
   font-size: 0.72rem;
   line-height: 16px;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 140ms ease, filter 140ms ease;
+}
+
+.timeline-segment:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(8, 12, 22, 0.45);
+  filter: saturate(1.12);
+}
+
+.timeline-ghost {
+  position: absolute;
+  top: 6px;
+  height: 20px;
+  border-radius: 5px;
+  pointer-events: none;
+  opacity: 0.58;
+}
+
+.timeline-ghost.zoom {
+  background: rgba(71, 215, 172, 0.18);
+  border: 1px dashed rgba(71, 215, 172, 0.7);
+}
+
+.timeline-ghost.text {
+  background: rgba(113, 156, 251, 0.18);
+  border: 1px dashed rgba(113, 156, 251, 0.72);
+}
+
+.timeline-segment-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.timeline-handle {
+  position: absolute;
+  top: 0;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.timeline-handle.left {
+  left: 0;
+}
+
+.timeline-handle.right {
+  right: 0;
 }
 
 .timeline-segment.zoom {
@@ -201,6 +286,25 @@ button:hover:not(:disabled),
   color: #b6d0ff;
 }
 
+.timeline-segment.selected {
+  transform: translateY(-1px);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.2) inset,
+    0 0 0 1px rgba(135, 171, 246, 0.45),
+    0 0 14px rgba(135, 171, 246, 0.38);
+}
+
+.timeline-segment.selected:hover {
+  transform: translateY(-1px);
+}
+
+.timeline-segment.zoom.selected {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+    0 0 0 1px rgba(103, 231, 194, 0.52),
+    0 0 14px rgba(103, 231, 194, 0.4);
+}
+
 .timeline-playhead {
   position: absolute;
   top: 0;
@@ -210,6 +314,44 @@ button:hover:not(:disabled),
   box-shadow: 0 0 0 1px rgba(249, 95, 98, 0.25);
   transform: translateX(-1px);
   pointer-events: none;
+}
+
+.effect-editor {
+  margin-top: 10px;
+  border: 1px solid #2c3a53;
+  border-radius: 8px;
+  background: #0c121d;
+  padding: 8px;
+}
+
+.effect-editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.effect-editor-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.effect-editor-fields .grid2 {
+  margin: 0;
+}
+
+.effect-editor-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ghost-btn {
+  border: 1px solid #3a4865;
+  background: #1a2334;
+  color: #d8e2f8;
+  border-radius: 6px;
+  padding: 2px 8px;
 }
 
 #overlayCanvas,
@@ -276,34 +418,6 @@ input {
   padding: 8px;
 }
 
-.list-wrap {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-  margin-top: 12px;
-}
-
-.list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.list li {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-  background: #121827;
-  border: 1px solid #293044;
-  border-radius: 8px;
-  padding: 8px;
-  font-size: 0.9rem;
-}
-
 .remove-btn {
   border-color: #55353a;
   background: #3f252b;
@@ -315,10 +429,6 @@ input {
 
 @media (min-width: 980px) {
   .editor-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .list-wrap {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

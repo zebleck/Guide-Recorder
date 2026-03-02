@@ -58,6 +58,18 @@
               <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
               <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
             </div>
+            <div class="row">
+              <label class="file-input">
+                Cursor Texture
+                <input id="cursorTextureInput" type="file" accept="image/png,image/webp,image/jpeg,image/svg+xml,image/*" />
+              </label>
+              <button id="cursorTextureClearBtn" type="button">Clear Texture</button>
+            </div>
+            <div class="grid2">
+              <label>Hotspot X (px)<input id="cursorHotspotX" type="number" step="1" value="0" min="0" /></label>
+              <label>Hotspot Y (px)<input id="cursorHotspotY" type="number" step="1" value="0" min="0" /></label>
+            </div>
+            <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
             <p class="muted">Use this when overlay cursor is shifted from the real cursor in playback.</p>
           </div>
 

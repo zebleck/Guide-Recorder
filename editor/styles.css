@@ -149,6 +149,16 @@ button:hover:not(:disabled),
   display: none;
 }
 
+.cursor-preview {
+  margin-top: 10px;
+  width: 140px;
+  height: 140px;
+  border: 1px solid #2a2f40;
+  border-radius: 8px;
+  background: #0d111a;
+  cursor: crosshair;
+}
+
 .editor-grid {
   display: grid;
   grid-template-columns: 1fr;

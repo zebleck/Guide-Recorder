@@ -33,6 +33,12 @@ const textY = document.getElementById("textY");
 const textValue = document.getElementById("textValue");
 const cursorOffsetXInput = document.getElementById("cursorOffsetX");
 const cursorOffsetYInput = document.getElementById("cursorOffsetY");
+const cursorTextureInput = document.getElementById("cursorTextureInput");
+const cursorTextureClearBtn = document.getElementById("cursorTextureClearBtn");
+const cursorHotspotXInput = document.getElementById("cursorHotspotX");
+const cursorHotspotYInput = document.getElementById("cursorHotspotY");
+const cursorPreviewCanvas = document.getElementById("cursorPreviewCanvas");
+const cursorPreviewCtx = cursorPreviewCanvas.getContext("2d");
 
 let mediaRecorder = null;
 let mediaStream = null;
@@ -46,6 +52,9 @@ let previewFrameCanvas = null;
 let previewFrameCtx = null;
 let composeCanvas = null;
 let composeCtx = null;
+const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
+let cursorTextureImage = null;
+let cursorPreviewMap = null;
 
 const project = {
   recordedBlob: null,
@@ -57,6 +66,10 @@ const project = {
   cursorOffsetX: 0,
   cursorOffsetY: 0,
   captureBounds: null,
+  cursorTextureDataUrl: "",
+  cursorTextureName: "",
+  cursorHotspotX: 0,
+  cursorHotspotY: 0,
 };
 
 const pointerState = {
@@ -158,6 +171,120 @@ function clearOverlay() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
+function drawDefaultCursor(renderCtx) {
+  renderCtx.beginPath();
+  renderCtx.moveTo(0, 0);
+  renderCtx.lineTo(0, 20);
+  renderCtx.lineTo(5.6, 14.8);
+  renderCtx.lineTo(10.2, 25.2);
+  renderCtx.lineTo(13.4, 23.8);
+  renderCtx.lineTo(8.8, 13.6);
+  renderCtx.lineTo(17.2, 13.6);
+  renderCtx.closePath();
+  renderCtx.fillStyle = "#ffffff";
+  renderCtx.fill();
+
+  renderCtx.strokeStyle = "rgba(0,0,0,0.9)";
+  renderCtx.lineWidth = 1.1;
+  renderCtx.stroke();
+}
+
+function clampHotspotToImageBounds() {
+  if (!cursorTextureImage) {
+    project.cursorHotspotX = 0;
+    project.cursorHotspotY = 0;
+    return;
+  }
+  const maxX = Math.max(0, cursorTextureImage.width - 1);
+  const maxY = Math.max(0, cursorTextureImage.height - 1);
+  project.cursorHotspotX = Math.max(0, Math.min(maxX, Math.round(Number(project.cursorHotspotX || 0))));
+  project.cursorHotspotY = Math.max(0, Math.min(maxY, Math.round(Number(project.cursorHotspotY || 0))));
+}
+
+function syncCursorHotspotInputs() {
+  cursorHotspotXInput.value = String(Math.round(Number(project.cursorHotspotX || 0)));
+  cursorHotspotYInput.value = String(Math.round(Number(project.cursorHotspotY || 0)));
+}
+
+function renderCursorPreviewCanvas() {
+  const w = cursorPreviewCanvas.width;
+  const h = cursorPreviewCanvas.height;
+  cursorPreviewCtx.clearRect(0, 0, w, h);
+  cursorPreviewCtx.fillStyle = "#0d111a";
+  cursorPreviewCtx.fillRect(0, 0, w, h);
+  cursorPreviewMap = null;
+
+  if (!cursorTextureImage) {
+    cursorPreviewCtx.save();
+    cursorPreviewCtx.translate(24, 24);
+    drawDefaultCursor(cursorPreviewCtx);
+    cursorPreviewCtx.restore();
+    return;
+  }
+
+  const maxW = w - 16;
+  const maxH = h - 16;
+  const scale = Math.min(maxW / cursorTextureImage.width, maxH / cursorTextureImage.height, 1);
+  const drawW = cursorTextureImage.width * scale;
+  const drawH = cursorTextureImage.height * scale;
+  const dx = (w - drawW) / 2;
+  const dy = (h - drawH) / 2;
+
+  cursorPreviewCtx.drawImage(cursorTextureImage, dx, dy, drawW, drawH);
+  const hx = dx + (project.cursorHotspotX / Math.max(1, cursorTextureImage.width)) * drawW;
+  const hy = dy + (project.cursorHotspotY / Math.max(1, cursorTextureImage.height)) * drawH;
+  cursorPreviewCtx.strokeStyle = "#47d7ac";
+  cursorPreviewCtx.lineWidth = 1.2;
+  cursorPreviewCtx.beginPath();
+  cursorPreviewCtx.moveTo(hx - 6, hy);
+  cursorPreviewCtx.lineTo(hx + 6, hy);
+  cursorPreviewCtx.moveTo(hx, hy - 6);
+  cursorPreviewCtx.lineTo(hx, hy + 6);
+  cursorPreviewCtx.stroke();
+
+  cursorPreviewMap = {
+    dx,
+    dy,
+    drawW,
+    drawH,
+  };
+}
+
+async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
+  if (!dataUrl) {
+    cursorTextureImage = null;
+    project.cursorTextureDataUrl = "";
+    project.cursorTextureName = "";
+    project.cursorHotspotX = 0;
+    project.cursorHotspotY = 0;
+    syncCursorHotspotInputs();
+    renderCursorPreviewCanvas();
+    return;
+  }
+
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+  cursorTextureImage = img;
+  project.cursorTextureDataUrl = dataUrl;
+  project.cursorTextureName = name || project.cursorTextureName || "cursor";
+  clampHotspotToImageBounds();
+  syncCursorHotspotInputs();
+  renderCursorPreviewCanvas();
+}
+
+async function readFileAsDataUrl(file) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Failed reading cursor texture file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function ensurePreviewFrameBuffer(width, height) {
   const w = Math.max(1, Math.round(width));
   const h = Math.max(1, Math.round(height));
@@ -248,34 +375,6 @@ function drawClickBursts(currentMs, zoomViewport, contentRect) {
     ctx.strokeStyle = color;
     ctx.stroke();
   }
-}
-
-function drawCursor(pointer) {
-  if (!pointer?.inFrame) return;
-  // Draw a standard arrow-like cursor with the hotspot at (x, y).
-  ctx.save();
-  ctx.translate(pointer.x, pointer.y);
-  ctx.shadowColor = "rgba(0,0,0,0.45)";
-  ctx.shadowBlur = 3;
-  ctx.shadowOffsetX = 1;
-  ctx.shadowOffsetY = 1;
-
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(0, 20);
-  ctx.lineTo(5.6, 14.8);
-  ctx.lineTo(10.2, 25.2);
-  ctx.lineTo(13.4, 23.8);
-  ctx.lineTo(8.8, 13.6);
-  ctx.lineTo(17.2, 13.6);
-  ctx.closePath();
-  ctx.fillStyle = "#ffffff";
-  ctx.fill();
-
-  ctx.strokeStyle = "rgba(0,0,0,0.9)";
-  ctx.lineWidth = 1.1;
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawHeldButtons(currentMs) {
@@ -466,22 +565,13 @@ function drawCursorOn(renderCtx, pointer) {
   renderCtx.shadowBlur = 3;
   renderCtx.shadowOffsetX = 1;
   renderCtx.shadowOffsetY = 1;
-
-  renderCtx.beginPath();
-  renderCtx.moveTo(0, 0);
-  renderCtx.lineTo(0, 20);
-  renderCtx.lineTo(5.6, 14.8);
-  renderCtx.lineTo(10.2, 25.2);
-  renderCtx.lineTo(13.4, 23.8);
-  renderCtx.lineTo(8.8, 13.6);
-  renderCtx.lineTo(17.2, 13.6);
-  renderCtx.closePath();
-  renderCtx.fillStyle = "#ffffff";
-  renderCtx.fill();
-
-  renderCtx.strokeStyle = "rgba(0,0,0,0.9)";
-  renderCtx.lineWidth = 1.1;
-  renderCtx.stroke();
+  if (cursorTextureImage) {
+    const hx = Number(project.cursorHotspotX || 0);
+    const hy = Number(project.cursorHotspotY || 0);
+    renderCtx.drawImage(cursorTextureImage, -hx, -hy);
+  } else {
+    drawDefaultCursor(renderCtx);
+  }
   renderCtx.restore();
 }
 
@@ -622,6 +712,8 @@ function mapPointThroughViewport(point, zoomViewport, width, height) {
 }
 
 function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) {
+  renderCtx.imageSmoothingEnabled = true;
+  renderCtx.imageSmoothingQuality = "high";
   if (!zoomViewport || zoomViewport.factor <= 1.001) {
     renderCtx.drawImage(sourceVideo, 0, 0, width, height);
     return;
@@ -654,6 +746,8 @@ function mapPointThroughViewportInRect(point, zoomViewport, rect) {
 
 function drawZoomedVideoInRect(renderCtx, sourceVideo, zoomViewport, rect) {
   if (!rect || rect.width <= 0 || rect.height <= 0) return;
+  renderCtx.imageSmoothingEnabled = true;
+  renderCtx.imageSmoothingQuality = "high";
   const srcW = Math.max(1, Number(sourceVideo?.videoWidth || 0));
   const srcH = Math.max(1, Number(sourceVideo?.videoHeight || 0));
   if (srcW <= 1 || srcH <= 1) return;
@@ -779,8 +873,8 @@ async function exportFinalVideo() {
 
     const mimeType = preferredExportMimeType();
     const recorder = mimeType
-      ? new MediaRecorder(exportStream, { mimeType, videoBitsPerSecond: 16000000 })
-      : new MediaRecorder(exportStream, { videoBitsPerSecond: 16000000 });
+      ? new MediaRecorder(exportStream, { mimeType, videoBitsPerSecond: PREVIEW_EXPORT_VIDEO_BITRATE })
+      : new MediaRecorder(exportStream, { videoBitsPerSecond: PREVIEW_EXPORT_VIDEO_BITRATE });
 
     const exportChunks = [];
     recorder.ondataavailable = (e) => {
@@ -1049,13 +1143,17 @@ function saveProjectJson() {
     texts: project.texts,
     cursorOffsetX: Number(project.cursorOffsetX || 0),
     cursorOffsetY: Number(project.cursorOffsetY || 0),
+    cursorTextureDataUrl: project.cursorTextureDataUrl || "",
+    cursorTextureName: project.cursorTextureName || "",
+    cursorHotspotX: Number(project.cursorHotspotX || 0),
+    cursorHotspotY: Number(project.cursorHotspotY || 0),
   };
 
   const blob = new Blob([JSON.stringify(serializable, null, 2)], { type: "application/json" });
   downloadBlob(blob, "guide-recorder-project.json");
 }
 
-function applyLoadedProjectData(data) {
+async function applyLoadedProjectData(data) {
   project.events = Array.isArray(data.events) ? data.events : [];
   project.events.sort((a, b) => Number(a.t || 0) - Number(b.t || 0));
   project.zooms = Array.isArray(data.zooms) ? data.zooms : [];
@@ -1071,8 +1169,13 @@ function applyLoadedProjectData(data) {
     : null;
   project.cursorOffsetX = Number(data.cursorOffsetX || 0);
   project.cursorOffsetY = Number(data.cursorOffsetY || 0);
+  project.cursorHotspotX = Number(data.cursorHotspotX || 0);
+  project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+  project.cursorTextureName = String(data.cursorTextureName || "");
   cursorOffsetXInput.value = String(project.cursorOffsetX);
   cursorOffsetYInput.value = String(project.cursorOffsetY);
+  syncCursorHotspotInputs();
+  await loadCursorTextureFromDataUrl(String(data.cursorTextureDataUrl || ""), project.cursorTextureName);
   refreshZoomList();
   refreshTextList();
 }
@@ -1080,7 +1183,7 @@ function applyLoadedProjectData(data) {
 async function loadProjectJson(file) {
   const text = await file.text();
   const data = JSON.parse(text);
-  applyLoadedProjectData(data);
+  await applyLoadedProjectData(data);
   setStatus("Project JSON loaded. Attach a video to preview effects.");
 }
 
@@ -1097,7 +1200,7 @@ async function tryDesktopAutoLoad() {
 
     const data = await jsonResp.json();
 
-    applyLoadedProjectData(data);
+    await applyLoadedProjectData(data);
 
     if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(importedVideoUrl);
@@ -1243,6 +1346,50 @@ cursorOffsetXInput.addEventListener("input", () => {
 cursorOffsetYInput.addEventListener("input", () => {
   project.cursorOffsetY = Number(cursorOffsetYInput.value || 0);
 });
+cursorHotspotXInput.addEventListener("input", () => {
+  project.cursorHotspotX = Number(cursorHotspotXInput.value || 0);
+  clampHotspotToImageBounds();
+  syncCursorHotspotInputs();
+  renderCursorPreviewCanvas();
+});
+cursorHotspotYInput.addEventListener("input", () => {
+  project.cursorHotspotY = Number(cursorHotspotYInput.value || 0);
+  clampHotspotToImageBounds();
+  syncCursorHotspotInputs();
+  renderCursorPreviewCanvas();
+});
+cursorTextureInput.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    await loadCursorTextureFromDataUrl(dataUrl, file.name);
+    setStatus(`Loaded cursor texture: ${file.name}`);
+  } catch (err) {
+    setStatus(`Failed to load cursor texture: ${err.message || String(err)}`);
+  } finally {
+    cursorTextureInput.value = "";
+  }
+});
+cursorTextureClearBtn.addEventListener("click", async () => {
+  await loadCursorTextureFromDataUrl("");
+  setStatus("Cleared cursor texture.");
+});
+cursorPreviewCanvas.addEventListener("click", (e) => {
+  if (!cursorTextureImage || !cursorPreviewMap) return;
+  const bounds = cursorPreviewCanvas.getBoundingClientRect();
+  const x = e.clientX - bounds.left;
+  const y = e.clientY - bounds.top;
+  const localX = x - cursorPreviewMap.dx;
+  const localY = y - cursorPreviewMap.dy;
+  if (localX < 0 || localY < 0 || localX > cursorPreviewMap.drawW || localY > cursorPreviewMap.drawH) return;
+
+  project.cursorHotspotX = Math.round((localX / cursorPreviewMap.drawW) * cursorTextureImage.width);
+  project.cursorHotspotY = Math.round((localY / cursorPreviewMap.drawH) * cursorTextureImage.height);
+  clampHotspotToImageBounds();
+  syncCursorHotspotInputs();
+  renderCursorPreviewCanvas();
+});
 
 videoEl.addEventListener("play", startRenderLoop);
 videoEl.addEventListener("pause", () => {
@@ -1288,6 +1435,7 @@ seekBar.addEventListener("change", () => {
 setStatus("Idle. Start Capture to begin.");
 refreshActionButtons();
 syncPlaybackUi();
+renderCursorPreviewCanvas();
 tryDesktopAutoLoad();
 
 

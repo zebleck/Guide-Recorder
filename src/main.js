@@ -23,6 +23,8 @@ let latestSaved = {
 
 const editorRoot = path.resolve(__dirname, "..", "editor");
 const STOP_HOTKEY = "CommandOrControl+Shift+X";
+const FFMPEG_PRESET = "veryfast";
+const FFMPEG_CRF = "16";
 
 function notifyRecordingStopped(result) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -442,9 +444,9 @@ function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
     "-c:v",
     "libx264",
     "-preset",
-    "ultrafast",
+    FFMPEG_PRESET,
     "-crf",
-    "20",
+    FFMPEG_CRF,
     "-movflags",
     "+frag_keyframe+empty_moov+default_base_moof+faststart",
     "-pix_fmt",
@@ -494,9 +496,9 @@ function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
     "-c:v",
     "libx264",
     "-preset",
-    "ultrafast",
+    FFMPEG_PRESET,
     "-crf",
-    "20",
+    FFMPEG_CRF,
     "-movflags",
     "+frag_keyframe+empty_moov+default_base_moof+faststart",
     "-pix_fmt",
@@ -519,9 +521,9 @@ function ffmpegArgsFullDesktop(outputPath, hideNativeCursor) {
     "-c:v",
     "libx264",
     "-preset",
-    "ultrafast",
+    FFMPEG_PRESET,
     "-crf",
-    "20",
+    FFMPEG_CRF,
     "-movflags",
     "+frag_keyframe+empty_moov+default_base_moof+faststart",
     "-pix_fmt",

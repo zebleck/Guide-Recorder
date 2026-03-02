@@ -1,4 +1,4 @@
-﻿const exportFinalBtn = document.getElementById("exportFinalBtn");
+const exportFinalBtn = document.getElementById("exportFinalBtn");
 const saveProjectBtn = document.getElementById("saveProjectBtn");
 const loadProjectInput = document.getElementById("loadProjectInput");
 const loadVideoInput = document.getElementById("loadVideoInput");
@@ -216,8 +216,8 @@ function positionEffectEditor(anchorEl = null, anchorPoint = null) {
   const maxLeft = hostRect.right - editorRect.width - 6;
   const leftPx = Math.max(minLeft, Math.min(maxLeft, centerX - editorRect.width / 2));
   const topPx = Math.min(hostRect.bottom - editorRect.height - 6, topY);
-  effectEditor.style.left = `${Math.round(leftPx - hostRect.left)}px`;
-  effectEditor.style.top = `${Math.round(topPx - hostRect.top)}px`;
+  effectEditor.style.left = `${Math.round(leftPx)}px`;
+  effectEditor.style.top = `${Math.round(topPx)}px`;
 }
 
 function toggleCursorPopover(show) {

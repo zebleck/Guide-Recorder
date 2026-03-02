@@ -7,48 +7,82 @@
     <link rel="icon" href="./logo.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div class="crown-bar" aria-hidden="true"></div>
+    <div id="effectEditor" class="effect-editor hidden">
+      <div class="effect-editor-head">
+        <strong id="effectEditorTitle">Edit</strong>
+        <button id="effectEditorCloseBtn" class="ghost-btn" type="button">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="3" y1="3" x2="11" y2="11"/><line x1="11" y1="3" x2="3" y2="11"/></svg>
+        </button>
+      </div>
+      <div id="effectEditorFields" class="effect-editor-fields"></div>
+      <div class="effect-editor-actions">
+        <button id="effectEditorDeleteBtn" type="button" class="remove-btn">Delete</button>
+      </div>
+    </div>
     <main class="app">
       <section class="panel controls">
-        <h1>Guide-Recorder Editor</h1>
-        <p class="muted">Record screen + interactions, then add zoom and text overlays.</p>
+        <div class="controls-header">
+          <div class="brand">
+            <h1>Guide Recorder</h1>
+            <span class="badge">Editor</span>
+          </div>
+          <p id="status" class="status" aria-live="polite"></p>
+        </div>
         <div class="row row-toolbar">
-          <button id="exportFinalBtn" disabled>Export Final Video</button>
-          <button id="saveProjectBtn" disabled>Download Project JSON</button>
-          <button id="cursorSettingsBtn" type="button">Cursor Settings</button>
+          <button id="exportFinalBtn" class="btn-primary" disabled>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10v2.667A1.334 1.334 0 0 1 12.667 14H3.333A1.334 1.334 0 0 1 2 12.667V10"/><polyline points="4.667 6.667 8 10 11.333 6.667"/><line x1="8" y1="10" x2="8" y2="2"/></svg>
+            Export Video
+          </button>
+          <button id="saveProjectBtn" disabled>
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 13.5h-10a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1h7l4 4v7a1 1 0 0 1-1 1z"/><polyline points="10.5 1.5 10.5 5.5 4.5 5.5"/><rect x="4.5" y="8.5" width="6" height="4"/></svg>
+            Save Project
+          </button>
+          <div class="toolbar-separator"></div>
+          <div class="cursor-btn-wrap">
+            <button id="cursorSettingsBtn" type="button">
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2l5.5 11 1.5-4.5L13.5 7z"/></svg>
+              Cursor
+            </button>
+            <div id="cursorPopover" class="cursor-popover hidden">
+              <div class="cursor-popover-head">
+                <strong>Cursor Calibration</strong>
+                <button id="cursorPopoverCloseBtn" class="ghost-btn" type="button">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="3" y1="3" x2="11" y2="11"/><line x1="11" y1="3" x2="3" y2="11"/></svg>
+                </button>
+              </div>
+              <div class="grid2">
+                <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
+                <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
+              </div>
+              <div class="row">
+                <label class="file-input">
+                  Cursor Texture
+                  <input id="cursorTextureInput" type="file" accept="image/png,image/webp,image/jpeg,image/svg+xml,image/*" />
+                </label>
+                <button id="cursorTextureClearBtn" type="button">Clear Texture</button>
+              </div>
+              <div class="grid2">
+                <label>Hotspot X (px)<input id="cursorHotspotX" type="number" step="1" value="0" min="0" /></label>
+                <label>Hotspot Y (px)<input id="cursorHotspotY" type="number" step="1" value="0" min="0" /></label>
+              </div>
+              <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
+            </div>
+          </div>
           <label class="file-input">
-            Load Project JSON
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 9.5v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3"/><polyline points="4.5 5 7.5 2 10.5 5"/><line x1="7.5" y1="2" x2="7.5" y2="10"/></svg>
+            Load Project
             <input id="loadProjectInput" type="file" accept="application/json" />
           </label>
           <label class="file-input">
-            Load Video File
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5.5 3 12.5 7.5 5.5 12 5.5 3"/></svg>
+            Load Video
             <input id="loadVideoInput" type="file" accept="video/webm,video/mp4,video/*" />
           </label>
-        </div>
-        <div id="cursorPopover" class="cursor-popover hidden">
-          <div class="cursor-popover-head">
-            <strong>Cursor Calibration</strong>
-            <button id="cursorPopoverCloseBtn" class="ghost-btn" type="button">x</button>
-          </div>
-          <div class="grid2">
-            <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
-            <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
-          </div>
-          <div class="row">
-            <label class="file-input">
-              Cursor Texture
-              <input id="cursorTextureInput" type="file" accept="image/png,image/webp,image/jpeg,image/svg+xml,image/*" />
-            </label>
-            <button id="cursorTextureClearBtn" type="button">Clear Texture</button>
-          </div>
-          <div class="grid2">
-            <label>Hotspot X (px)<input id="cursorHotspotX" type="number" step="1" value="0" min="0" /></label>
-            <label>Hotspot Y (px)<input id="cursorHotspotY" type="number" step="1" value="0" min="0" /></label>
-          </div>
-          <canvas id="cursorPreviewCanvas" width="140" height="140" class="cursor-preview" title="Click to set cursor hotspot"></canvas>
         </div>
 
       </section>
@@ -88,16 +122,6 @@
             </div>
             <div class="timeline-playhead" id="timelinePlayhead"></div>
           </div>
-          <div id="effectEditor" class="effect-editor hidden">
-            <div class="effect-editor-head">
-              <strong id="effectEditorTitle">Edit</strong>
-              <button id="effectEditorCloseBtn" class="ghost-btn" type="button">x</button>
-            </div>
-            <div id="effectEditorFields" class="effect-editor-fields"></div>
-            <div class="effect-editor-actions">
-              <button id="effectEditorDeleteBtn" type="button" class="remove-btn">Delete</button>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -106,4 +130,3 @@
     <script src="./app.js" defer></script>
   </body>
 </html>
-

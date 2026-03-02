@@ -1,55 +1,62 @@
 /* ============================================
-   Guide-Recorder Editor — Cinematic Control Room
-   Dark mode, broadcast-inspired aesthetic
+   Guide-Recorder Editor — Midnight Ember
+   Warm dark aesthetic with coral/violet accents
    ============================================ */
 
 :root {
-  /* Base palette — obsidian to charcoal */
-  --bg-deep: #050608;
-  --bg-base: #0a0c0f;
-  --bg-elevated: #0f1216;
-  --bg-panel: #13171d;
-  --bg-panel-2: #181d25;
-  --bg-input: #0c0e12;
+  /* Warm dark palette — charcoal with brown undertones */
+  --bg-deep: #0C0A0E;
+  --bg-base: #110F14;
+  --bg-elevated: #17141B;
+  --bg-panel: #1C1922;
+  --bg-panel-2: #221F2A;
+  --bg-input: #13111A;
 
-  /* Text */
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
-  --text-muted: #64748b;
-  --text-dim: #475569;
+  /* Text — warm whites */
+  --text-primary: #F5F0EB;
+  --text-secondary: #C8C1B8;
+  --text-muted: #7A7268;
+  --text-dim: #5A5350;
 
-  /* Accent — electric teal (zoom, primary actions) */
-  --accent: #14b8a6;
-  --accent-hover: #2dd4bf;
-  --accent-muted: rgba(20, 184, 166, 0.25);
-  --accent-glow: rgba(20, 184, 166, 0.35);
+  /* Primary accent — warm coral/ember */
+  --accent: #FF7A5C;
+  --accent-hover: #FF9580;
+  --accent-muted: rgba(255, 122, 92, 0.18);
+  --accent-glow: rgba(255, 122, 92, 0.35);
+  --accent-deep: #E8614A;
 
-  /* Secondary — amber (text overlays, warmth) */
-  --accent-2: #f59e0b;
-  --accent-2-muted: rgba(245, 158, 11, 0.22);
-  --accent-2-glow: rgba(245, 158, 11, 0.4);
+  /* Secondary — soft violet (text overlays) */
+  --accent-2: #A78BFA;
+  --accent-2-muted: rgba(167, 139, 250, 0.16);
+  --accent-2-glow: rgba(167, 139, 250, 0.4);
 
-  /* Danger / playhead */
-  --danger: #f43f5e;
-  --danger-muted: rgba(244, 63, 94, 0.25);
-  --danger-glow: rgba(244, 63, 94, 0.5);
+  /* Danger */
+  --danger: #EF4444;
+  --danger-muted: rgba(239, 68, 68, 0.2);
+  --danger-glow: rgba(239, 68, 68, 0.5);
 
-  /* Borders & strokes */
-  --stroke: rgba(51, 65, 85, 0.6);
-  --stroke-subtle: rgba(51, 65, 85, 0.35);
+  /* Borders */
+  --stroke: rgba(255, 255, 255, 0.08);
+  --stroke-subtle: rgba(255, 255, 255, 0.05);
+  --stroke-hover: rgba(255, 255, 255, 0.14);
 
   /* Typography */
-  --font-display: "Outfit", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   /* Motion */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
 * {
   box-sizing: border-box;
 }
+
+/* ============================================
+   Body — atmospheric background
+   ============================================ */
 
 body {
   margin: 0;
@@ -60,40 +67,62 @@ body {
   font-weight: 400;
   background: var(--bg-deep);
   background-image:
-    radial-gradient(ellipse 120% 80% at 50% -20%, rgba(20, 184, 166, 0.06) 0%, transparent 50%),
-    radial-gradient(ellipse 80% 50% at 100% 50%, rgba(245, 158, 11, 0.03) 0%, transparent 40%);
+    radial-gradient(ellipse 100% 60% at 20% -10%, rgba(255, 122, 92, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 50% at 80% 110%, rgba(167, 139, 250, 0.04) 0%, transparent 45%);
 }
 
-/* Noise overlay for texture */
+/* Subtle grain overlay */
 body::after {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.022;
   z-index: 9999;
+  mix-blend-mode: overlay;
 }
 
 /* ============================================
-   App layout — staggered entrance
+   Crown bar — signature gradient accent
+   ============================================ */
+
+.crown-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #FF7A5C 0%, #FF9580 25%, #D4A853 50%, #A78BFA 75%, #7C6AE8 100%);
+  z-index: 10000;
+  opacity: 0;
+  animation: crownFade 0.8s 0.3s ease forwards;
+}
+
+@keyframes crownFade {
+  to { opacity: 1; }
+}
+
+/* ============================================
+   App layout
    ============================================ */
 
 .app {
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 20px;
-  max-width: 1400px;
+  gap: 16px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 20px;
+  padding: 20px 24px 16px;
+  padding-top: 23px;
   height: 100vh;
-  animation: appReveal 0.6s var(--ease-out-expo) forwards;
+  animation: appReveal 0.7s var(--ease-out-expo) forwards;
 }
 
 @keyframes appReveal {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(12px);
   }
   to {
     opacity: 1;
@@ -101,12 +130,20 @@ body::after {
   }
 }
 
+/* ============================================
+   Panels — frosted glass
+   ============================================ */
+
 .panel {
-  background: linear-gradient(165deg, var(--bg-panel) 0%, var(--bg-panel-2) 100%);
+  background: linear-gradient(170deg, var(--bg-panel) 0%, var(--bg-panel-2) 100%);
   border: 1px solid var(--stroke);
-  border-radius: 14px;
-  padding: 18px 20px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 18px;
+  padding: 18px 22px;
+  box-shadow:
+    0 4px 32px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
 
 /* ============================================
@@ -115,14 +152,14 @@ body::after {
 
 .controls {
   position: relative;
-  z-index: 100;
-  animation: panelSlide 0.5s var(--ease-out-expo) 0.08s both;
+  z-index: 10;
+  animation: controlsSlide 0.6s var(--ease-out-expo) 0.1s both;
 }
 
-@keyframes panelSlide {
+@keyframes controlsSlide {
   from {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(-8px);
   }
   to {
     opacity: 1;
@@ -130,35 +167,73 @@ body::after {
   }
 }
 
-.controls h1 {
-  margin: 0 0 4px;
-  font-size: 1.5rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text-primary);
+.controls-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 14px;
 }
 
-.controls h1::before {
-  content: "";
-  width: 5px;
-  height: 1.1em;
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-2) 100%);
-  border-radius: 3px;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   flex-shrink: 0;
+}
+
+.controls h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  line-height: 1;
+  font-optical-sizing: auto;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-muted);
+  border: 1px solid rgba(255, 122, 92, 0.2);
+  border-radius: 999px;
+  line-height: 1;
 }
 
 .muted {
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   margin-top: 2px;
 }
 
+.status {
+  margin: 0;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  min-height: 1.2em;
+  text-align: right;
+  opacity: 0.85;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================
+   Toolbar row
+   ============================================ */
+
 .row {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   margin-top: 14px;
 }
@@ -166,12 +241,22 @@ body::after {
 .controls .row-toolbar {
   flex-wrap: nowrap;
   flex-shrink: 0;
+  align-items: center;
+  margin-top: 0;
 }
 
-.controls .row-toolbar button,
-.controls .row-toolbar .file-input {
+.controls .row-toolbar > button,
+.controls .row-toolbar > .file-input,
+.controls .row-toolbar > .cursor-btn-wrap {
   flex-shrink: 0;
-  white-space: nowrap;
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 24px;
+  background: var(--stroke);
+  margin: 0 4px;
+  flex-shrink: 0;
 }
 
 /* ============================================
@@ -181,35 +266,54 @@ body::after {
 button,
 .file-input {
   font-family: var(--font-display);
-  font-size: 0.875rem;
-  font-weight: 500;
-  padding: 10px 16px;
-  border-radius: 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 9px 14px;
+  border-radius: 12px;
   border: 1px solid var(--stroke);
   background: var(--bg-elevated);
-  color: var(--text-primary);
+  color: var(--text-secondary);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   transition:
-    background 0.2s ease,
-    border-color 0.2s ease,
-    transform 0.15s var(--ease-spring),
-    box-shadow 0.2s ease;
+    background 0.2s var(--ease-smooth),
+    border-color 0.2s var(--ease-smooth),
+    color 0.2s var(--ease-smooth),
+    transform 0.2s var(--ease-spring),
+    box-shadow 0.2s var(--ease-smooth);
+  white-space: nowrap;
 }
 
-button:hover:not(:disabled),
+button svg,
+.file-input svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+button:hover:not(:disabled) svg,
+.file-input:hover svg {
+  opacity: 1;
+}
+
+button:hover:not(:disabled):not(.lane-add-btn):not(.timeline-remove-btn),
 .file-input:hover {
   background: var(--bg-panel-2);
-  border-color: rgba(71, 85, 105, 0.6);
+  border-color: var(--stroke-hover);
+  color: var(--text-primary);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 button:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(0) scale(0.98);
+  transition-duration: 0.08s;
 }
 
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.35;
   cursor: not-allowed;
   transform: none;
 }
@@ -218,26 +322,66 @@ button:disabled {
   display: none;
 }
 
+/* Primary action button */
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
+  border-color: rgba(255, 122, 92, 0.3);
+  color: #fff;
+  box-shadow: 0 2px 12px rgba(255, 122, 92, 0.2);
+}
+
+.btn-primary svg {
+  opacity: 1;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+  border-color: rgba(255, 122, 92, 0.5);
+  color: #fff;
+  box-shadow: 0 4px 24px rgba(255, 122, 92, 0.3);
+}
+
+.btn-primary:disabled {
+  background: var(--bg-elevated);
+  border-color: var(--stroke);
+  color: var(--text-dim);
+  box-shadow: none;
+}
+
+/* Ghost button */
 .ghost-btn {
   background: transparent;
   border-color: var(--stroke-subtle);
-  padding: 6px 12px;
+  padding: 6px 8px;
   font-size: 0.8rem;
+  color: var(--text-muted);
+  border-radius: 8px;
 }
 
-.ghost-btn:hover {
+.ghost-btn:hover:not(:disabled) {
   background: var(--bg-input);
+  color: var(--text-primary);
 }
 
+/* Danger button */
 .remove-btn {
-  border-color: rgba(244, 63, 94, 0.4);
+  border-color: rgba(239, 68, 68, 0.3);
   background: var(--danger-muted);
-  color: #fda4af;
+  color: #FCA5A5;
 }
 
 .remove-btn:hover:not(:disabled) {
-  background: rgba(244, 63, 94, 0.2);
+  background: rgba(239, 68, 68, 0.25);
   border-color: var(--danger);
+  color: #FEE2E2;
+}
+
+/* ============================================
+   Cursor button wrapper
+   ============================================ */
+
+.cursor-btn-wrap {
+  position: relative;
 }
 
 /* ============================================
@@ -246,29 +390,42 @@ button:disabled {
 
 .cursor-popover {
   position: absolute;
-  right: 20px;
-  top: 100px;
+  left: 0;
+  top: 100%;
+  margin-top: 8px;
   width: 360px;
-  padding: 16px;
+  padding: 18px;
   background: var(--bg-panel);
   border: 1px solid var(--stroke);
-  border-radius: 12px;
+  border-radius: 16px;
   box-shadow:
-    0 20px 40px rgba(0, 0, 0, 0.5),
+    0 24px 48px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(255, 255, 255, 0.03);
-  z-index: 20;
+  z-index: 100;
+  animation: popoverIn 0.25s var(--ease-out-expo) both;
+}
+
+@keyframes popoverIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .cursor-popover-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .cursor-popover-head strong {
   font-size: 0.95rem;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .cursor-preview {
@@ -276,7 +433,7 @@ button:disabled {
   width: 140px;
   height: 140px;
   border: 1px solid var(--stroke);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-input);
   cursor: crosshair;
 }
@@ -292,36 +449,53 @@ label {
   flex-direction: column;
   gap: 6px;
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-weight: 500;
+}
+
+label.file-input {
+  flex-direction: row;
+  align-items: center;
 }
 
 input {
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   padding: 10px 12px;
   background: var(--bg-input);
   border: 1px solid var(--stroke);
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--text-primary);
-  transition: border-color 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
 }
 
 /* ============================================
-   Preview section — cinema frame
+   Preview section — cinema viewport
    ============================================ */
 
 .preview-wrap {
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto auto;
-  gap: 14px;
-  animation: panelSlide 0.5s var(--ease-out-expo) 0.12s both;
+  gap: 12px;
+  animation: previewSlide 0.6s var(--ease-out-expo) 0.15s both;
+}
+
+@keyframes previewSlide {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .preview-viewport {
@@ -336,23 +510,24 @@ input:focus {
   width: 100%;
   margin: 0 auto;
   aspect-ratio: 16 / 9;
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
-  background: var(--bg-deep);
+  background: #000;
   border: 1px solid var(--stroke);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
-    0 20px 50px rgba(0, 0, 0, 0.4);
+    0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 24px 64px rgba(0, 0, 0, 0.5);
 }
 
-/* Cinema bezel effect */
+/* Cinema vignette */
 .preview-stage::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: 12px;
-  box-shadow: inset 0 0 60px 20px rgba(0, 0, 0, 0.3);
+  border-radius: 14px;
+  box-shadow: inset 0 0 80px 30px rgba(0, 0, 0, 0.35);
   pointer-events: none;
+  z-index: 1;
 }
 
 #previewVideo,
@@ -374,7 +549,7 @@ input:focus {
 }
 
 /* ============================================
-   Preview controls — playbar
+   Play controls — refined transport bar
    ============================================ */
 
 .preview-controls {
@@ -382,53 +557,72 @@ input:focus {
   grid-template-columns: auto 1fr auto;
   gap: 14px;
   align-items: center;
+  padding: 0 2px;
 }
 
 #playPauseBtn {
-  min-width: 80px;
+  min-width: 72px;
+  padding: 8px 16px;
+  font-weight: 600;
+  border-radius: 10px;
 }
 
+/* Seek bar — custom styled */
 #seekBar {
   width: 100%;
-  height: 8px;
+  height: 6px;
   -webkit-appearance: none;
   appearance: none;
   background: var(--bg-input);
-  border-radius: 4px;
+  border: 1px solid var(--stroke-subtle);
+  border-radius: 999px;
   outline: none;
+  transition: height 0.15s ease;
+}
+
+#seekBar:hover {
+  height: 8px;
 }
 
 #seekBar::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  box-shadow: 0 0 0 2px var(--bg-base), 0 2px 8px rgba(20, 184, 166, 0.4);
-  transition: transform 0.15s var(--ease-spring);
+  border: 2px solid var(--bg-base);
+  box-shadow:
+    0 0 0 2px rgba(255, 122, 92, 0.25),
+    0 2px 8px rgba(255, 122, 92, 0.3);
+  transition: transform 0.15s var(--ease-spring), box-shadow 0.2s ease;
 }
 
 #seekBar::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
+  transform: scale(1.15);
+  box-shadow:
+    0 0 0 3px rgba(255, 122, 92, 0.3),
+    0 2px 12px rgba(255, 122, 92, 0.4);
 }
 
 #seekBar::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  border: none;
-  box-shadow: 0 2px 8px rgba(20, 184, 166, 0.4);
+  border: 2px solid var(--bg-base);
+  box-shadow: 0 2px 8px rgba(255, 122, 92, 0.3);
 }
 
 #timeLabel {
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
-  min-width: 120px;
+  min-width: 110px;
   text-align: right;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ============================================
@@ -440,72 +634,87 @@ input:focus {
   right: 14px;
   top: 14px;
   padding: 8px 14px;
-  background: rgba(0, 0, 0, 0.75);
-  border: 1px solid var(--stroke);
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 999px;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-family: var(--font-mono);
-  backdrop-filter: blur(8px);
+  color: var(--text-primary);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 2;
 }
 
 /* ============================================
-   Effects timeline — film strip aesthetic
+   Effects timeline — mixing console aesthetic
    ============================================ */
 
 .effects-timeline {
   position: relative;
-  padding: 14px;
-  background: var(--bg-panel);
+  padding: 14px 16px;
+  background: var(--bg-elevated);
   border: 1px solid var(--stroke);
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-  animation: panelSlide 0.5s var(--ease-out-expo) 0.16s both;
+  border-radius: 14px;
+  box-shadow:
+    0 2px 16px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  animation: timelineSlide 0.6s var(--ease-out-expo) 0.2s both;
+}
+
+@keyframes timelineSlide {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .timeline-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 700;
   color: var(--text-secondary);
   margin-bottom: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
 }
 
 .timeline-header .muted {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
+  opacity: 0.6;
 }
 
 .timeline-surface {
   position: relative;
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
-  background:
-    linear-gradient(90deg, rgba(51, 65, 85, 0.15) 1px, transparent 1px) 0 0 / 5% 100%,
-    var(--bg-input);
+  background: var(--bg-input);
   border: 1px solid var(--stroke);
   cursor: pointer;
 }
 
-/* Ruler ticks */
+/* Subtle grid ticks */
 .timeline-surface::after {
   content: "";
   position: absolute;
   top: 0;
   left: 64px;
   right: 0;
-  height: 4px;
+  height: 100%;
   background: repeating-linear-gradient(
     90deg,
     transparent,
-    transparent 19px,
-    rgba(71, 85, 105, 0.4) 19px,
-    rgba(71, 85, 105, 0.4) 20px
+    transparent calc(10% - 1px),
+    rgba(255, 255, 255, 0.03) calc(10% - 1px),
+    rgba(255, 255, 255, 0.03) 10%
   );
   pointer-events: none;
 }
@@ -513,7 +722,7 @@ input:focus {
 .timeline-lane {
   display: grid;
   grid-template-columns: 64px 1fr;
-  min-height: 38px;
+  min-height: 40px;
   border-top: 1px solid var(--stroke-subtle);
 }
 
@@ -524,41 +733,45 @@ input:focus {
 .timeline-name {
   display: grid;
   place-items: center;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-dim);
   border-right: 1px solid var(--stroke-subtle);
-  background: var(--bg-elevated);
+  background: rgba(0, 0, 0, 0.15);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
 }
 
 .timeline-track {
   position: relative;
 }
 
-/* Add buttons */
+/* Lane add buttons */
 .lane-add-btn {
   position: absolute;
   top: 50%;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   margin: 0;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: var(--accent);
-  color: var(--bg-deep);
-  font-size: 14px;
-  font-weight: 600;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
   line-height: 1;
   display: grid;
   place-items: center;
   opacity: 0;
-  transform: translate(-50%, -50%) scale(0.85);
-  transition: opacity 0.2s ease, transform 0.2s var(--ease-spring);
+  transform: translate(-50%, -50%) scale(0.8);
+  transition:
+    opacity 0.2s ease,
+    transform 0.25s var(--ease-spring),
+    background 0.15s ease,
+    box-shadow 0.2s ease;
   z-index: 3;
-  box-shadow: 0 2px 8px rgba(20, 184, 166, 0.35);
+  box-shadow: 0 2px 10px rgba(255, 122, 92, 0.35);
 }
 
 .timeline-track:hover .lane-add-btn {
@@ -568,7 +781,16 @@ input:focus {
 
 .lane-add-btn:hover {
   background: var(--accent-hover);
-  transform: translate(-50%, -50%) scale(1.1);
+}
+
+/* Text lane uses violet accent */
+#textTrack .lane-add-btn {
+  background: var(--accent-2);
+  box-shadow: 0 2px 10px rgba(167, 139, 250, 0.35);
+}
+
+#textTrack .lane-add-btn:hover {
+  background: #BBA4FB;
 }
 
 .lane-add-btn.blocked {
@@ -580,27 +802,27 @@ input:focus {
 .timeline-segment {
   position: absolute;
   top: 6px;
-  height: 26px;
+  height: 28px;
   border-radius: 8px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  padding: 4px 10px;
-  font-size: 0.78rem;
-  font-weight: 500;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
   line-height: 18px;
   cursor: pointer;
   user-select: none;
   transition:
-    transform 0.15s var(--ease-spring),
+    transform 0.2s var(--ease-spring),
     box-shadow 0.2s ease,
     filter 0.2s ease;
 }
 
 .timeline-segment:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
-  filter: brightness(1.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  filter: brightness(1.1);
 }
 
 .timeline-segment-label {
@@ -610,9 +832,10 @@ input:focus {
   padding-right: 22px;
 }
 
+/* Ghost preview */
 .timeline-ghost {
   position: absolute;
-  top: 8px;
+  top: 9px;
   height: 22px;
   border-radius: 6px;
   pointer-events: none;
@@ -621,66 +844,68 @@ input:focus {
 
 .timeline-ghost.zoom {
   background: var(--accent-muted);
-  border: 1px dashed rgba(20, 184, 166, 0.6);
+  border: 1px dashed rgba(255, 122, 92, 0.5);
 }
 
 .timeline-ghost.text {
   background: var(--accent-2-muted);
-  border: 1px dashed rgba(245, 158, 11, 0.6);
+  border: 1px dashed rgba(167, 139, 250, 0.5);
 }
 
+/* Zoom segments — coral */
 .timeline-segment.zoom {
   background: var(--accent-muted);
-  border: 1px solid rgba(20, 184, 166, 0.5);
-  color: #5eead4;
+  border: 1px solid rgba(255, 122, 92, 0.35);
+  color: #FFB4A2;
 }
 
+/* Text segments — violet */
 .timeline-segment.text {
   background: var(--accent-2-muted);
-  border: 1px solid rgba(245, 158, 11, 0.5);
-  color: #fcd34d;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  color: #C4B5FD;
 }
 
 .timeline-segment.selected {
   transform: translateY(-2px);
-  box-shadow:
-    0 0 0 2px rgba(255, 255, 255, 0.1),
-    0 0 20px var(--accent-glow);
 }
 
 .timeline-segment.zoom.selected {
   box-shadow:
-    0 0 0 2px rgba(255, 255, 255, 0.08),
-    0 0 20px var(--accent-glow);
+    0 0 0 2px rgba(255, 122, 92, 0.25),
+    0 4px 20px var(--accent-glow);
+  border-color: rgba(255, 122, 92, 0.6);
 }
 
 .timeline-segment.text.selected {
   box-shadow:
-    0 0 0 2px rgba(255, 255, 255, 0.08),
-    0 0 20px var(--accent-2-glow);
+    0 0 0 2px rgba(167, 139, 250, 0.25),
+    0 4px 20px var(--accent-2-glow);
+  border-color: rgba(167, 139, 250, 0.6);
 }
 
+/* Remove button on segments */
 .timeline-remove-btn {
   position: absolute;
   top: 50%;
-  right: 8px;
-  width: 16px;
-  height: 16px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
   margin: 0;
   padding: 0;
   transform: translateY(-50%);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 50%;
-  background: rgba(15, 23, 42, 0.9);
-  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text-muted);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1;
   display: grid;
   place-items: center;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
   z-index: 4;
 }
 
@@ -692,9 +917,11 @@ input:focus {
 
 .timeline-remove-btn:hover {
   background: var(--danger-muted);
-  color: #fda4af;
+  color: #FCA5A5;
+  border-color: rgba(239, 68, 68, 0.4);
 }
 
+/* Resize handles */
 .timeline-handle {
   position: absolute;
   top: 0;
@@ -712,18 +939,33 @@ input:focus {
   right: 0;
 }
 
-/* Playhead */
+/* Playhead — warm glow */
 .timeline-playhead {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 3px;
-  background: var(--danger);
+  width: 2px;
+  background: var(--accent);
   box-shadow:
-    0 0 12px var(--danger-glow),
-    0 0 0 1px rgba(244, 63, 94, 0.3);
+    0 0 10px var(--accent-glow),
+    0 0 4px rgba(255, 122, 92, 0.6);
   transform: translateX(-50%);
   pointer-events: none;
+  border-radius: 1px;
+}
+
+/* Playhead top marker */
+.timeline-playhead::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 /* ============================================
@@ -731,28 +973,30 @@ input:focus {
    ============================================ */
 
 .effect-editor {
-  position: absolute;
-  padding: 14px;
+  position: fixed;
+  padding: 16px;
   width: 320px;
-  background: var(--bg-panel);
+  background: #1C1922;
   border: 1px solid var(--stroke);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow:
-    0 24px 48px rgba(0, 0, 0, 0.5),
+    0 24px 56px rgba(0, 0, 0, 0.55),
     0 0 0 1px rgba(255, 255, 255, 0.03);
-  z-index: 12;
+  z-index: 10000;
+  animation: popoverIn 0.2s var(--ease-out-expo) both;
+  isolation: isolate;
 }
 
 .effect-editor-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .effect-editor-head strong {
   font-size: 0.95rem;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .effect-editor-fields {
@@ -765,7 +1009,7 @@ input:focus {
 }
 
 .effect-editor-actions {
-  margin-top: 12px;
+  margin-top: 14px;
   display: flex;
   justify-content: flex-end;
 }
@@ -785,4 +1029,31 @@ h2, h3 {
 h3 {
   font-size: 0.95rem;
   color: var(--text-secondary);
+}
+
+/* ============================================
+   Selection & scrollbar styling
+   ============================================ */
+
+::selection {
+  background: rgba(255, 122, 92, 0.3);
+  color: var(--text-primary);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--stroke);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
 }

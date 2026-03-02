@@ -12,6 +12,7 @@ app.commandLine.appendSwitch("log-level", "3");
 
 let mainWindow = null;
 let selectorWindow = null;
+let areaPreviewWindow = null;
 let selectorState = null;
 let activeSession = null;
 let editorServer = null;
@@ -40,8 +41,10 @@ try {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 460,
-    height: 300,
+    width: 520,
+    height: 64,
+    frame: false,
+    show: false,
     resizable: false,
     alwaysOnTop: true,
     webPreferences: {
@@ -149,6 +152,54 @@ function openSelectorWindow() {
     }
     selectorWindow = null;
     selectorState = null;
+  });
+}
+
+function closeAreaPreviewWindow() {
+  if (!areaPreviewWindow || areaPreviewWindow.isDestroyed()) {
+    areaPreviewWindow = null;
+    return;
+  }
+  areaPreviewWindow.close();
+  areaPreviewWindow = null;
+}
+
+function openAreaPreviewWindow(bounds) {
+  const v = virtualDesktopBounds();
+  closeAreaPreviewWindow();
+  areaPreviewWindow = new BrowserWindow({
+    x: v.x,
+    y: v.y,
+    width: v.width,
+    height: v.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  areaPreviewWindow.setMenuBarVisibility(false);
+  areaPreviewWindow.setAlwaysOnTop(true, "floating");
+  areaPreviewWindow.setIgnoreMouseEvents(true, { forward: true });
+  areaPreviewWindow.loadFile(path.join(__dirname, "area-preview.html"), {
+    query: {
+      vx: String(v.x),
+      vy: String(v.y),
+      x: String(Math.round(bounds.x)),
+      y: String(Math.round(bounds.y)),
+      w: String(Math.round(bounds.width)),
+      h: String(Math.round(bounds.height)),
+    },
+  });
+  areaPreviewWindow.on("closed", () => {
+    areaPreviewWindow = null;
   });
 }
 
@@ -616,9 +667,10 @@ ipcMain.handle("recorder:fitWindow", async (_evt, payload) => {
   const requestedHeight = Number(payload?.height || 0);
   const requestedWidth = Number(payload?.width || 0);
   const [currentW] = mainWindow.getContentSize();
-  const width = Math.max(420, Number.isFinite(requestedWidth) && requestedWidth > 0 ? requestedWidth : currentW);
-  const height = Math.max(260, Math.min(900, Number.isFinite(requestedHeight) ? Math.round(requestedHeight) : 320));
+  const width = Math.max(360, Number.isFinite(requestedWidth) && requestedWidth > 0 ? requestedWidth : currentW);
+  const height = Math.max(40, Math.min(140, Number.isFinite(requestedHeight) ? Math.round(requestedHeight) : 48));
   mainWindow.setContentSize(width, height, true);
+  if (!mainWindow.isVisible()) mainWindow.show();
   return { ok: true, width, height };
 });
 
@@ -636,6 +688,32 @@ ipcMain.handle("recorder:pickArea", async () => {
     }
     selectorState.pendingResolve = resolve;
   });
+});
+
+ipcMain.handle("recorder:setAreaPreview", async (_evt, payload) => {
+  const enabled = Boolean(payload?.enabled);
+  const b = payload?.bounds;
+  const hasBounds =
+    b &&
+    Number.isFinite(Number(b.x)) &&
+    Number.isFinite(Number(b.y)) &&
+    Number.isFinite(Number(b.width)) &&
+    Number.isFinite(Number(b.height)) &&
+    Number(b.width) > 10 &&
+    Number(b.height) > 10;
+
+  if (!enabled || !hasBounds) {
+    closeAreaPreviewWindow();
+    return { ok: true, visible: false };
+  }
+
+  openAreaPreviewWindow({
+    x: Number(b.x),
+    y: Number(b.y),
+    width: Number(b.width),
+    height: Number(b.height),
+  });
+  return { ok: true, visible: true };
 });
 
 ipcMain.handle("selector:getContext", async () => {
@@ -885,6 +963,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       captureMode = "full-desktop-fallback";
     }
 
+    closeAreaPreviewWindow();
     if (mainWindow) mainWindow.hide();
     globalShortcut.unregister(STOP_HOTKEY);
     const stopHotkeyRegistered = globalShortcut.register(STOP_HOTKEY, () => {
@@ -923,9 +1002,11 @@ app.whenReady().then(async () => {
   }
 });
 app.on("will-quit", () => {
+  closeAreaPreviewWindow();
   globalShortcut.unregisterAll();
 });
 app.on("window-all-closed", () => {
+  closeAreaPreviewWindow();
   if (process.platform !== "darwin") app.quit();
 });
 

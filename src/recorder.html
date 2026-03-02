@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -7,43 +7,38 @@
     <link rel="stylesheet" href="./recorder.css" />
   </head>
   <body>
+    <svg aria-hidden="true" class="icon-sprite">
+      <symbol id="i-record" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="7" fill="currentColor" />
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24">
+        <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
+      </symbol>
+      <symbol id="i-select" viewBox="0 0 24 24">
+        <path d="M6 10V6h4M14 6h4v4M18 14v4h-4M10 18H6v-4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
+      </symbol>
+    </svg>
+
     <main class="dock">
-      <h1>Recorder Dock</h1>
-
-      <label>Capture source
-        <select id="sourceSelect"></select>
-      </label>
-
-      <label class="inline">
-        <input id="autoOpenEditor" type="checkbox" checked />
-        Open browser editor after save
-      </label>
-
-      <label class="inline">
-        <input id="hideNativeCursor" type="checkbox" checked />
-        Hide real cursor in capture (use post cursor)
-      </label>
-
-      <label class="inline">
-        <input id="useSelectedArea" type="checkbox" />
-        Use selected area
-      </label>
-
-      <div class="row">
-        <button id="selectAreaBtn">Select Area</button>
-        <div id="areaInfo" class="small">Area: not selected</div>
+      <div class="top-row">
+        <select id="sourceSelect" aria-label="Capture source"></select>
+        <div class="toolbar">
+          <button id="selectAreaBtn" class="icon-btn" title="Select area" aria-label="Select area">
+            <svg class="icon"><use href="#i-select" /></svg>
+          </button>
+          <button id="startBtn" class="icon-btn record" title="Start recording" aria-label="Start recording">
+            <svg class="icon"><use href="#i-record" /></svg>
+          </button>
+          <button id="stopBtn" class="icon-btn stop" title="Stop and save recording" aria-label="Stop and save recording" disabled>
+            <svg class="icon"><use href="#i-stop" /></svg>
+          </button>
+          <div class="drag-handle" title="Drag window" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
       </div>
-
-      <div class="row">
-        <button id="refreshBtn">Refresh</button>
-        <button id="startBtn">Record</button>
-        <button id="stopBtn" disabled>Stop + Save</button>
-      </div>
-
-      <div id="status" class="status">Idle</div>
     </main>
 
     <script src="./recorder.js" defer></script>
   </body>
 </html>
-

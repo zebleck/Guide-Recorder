@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Area Preview</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      #rect {
+        position: absolute;
+        border: 2px solid rgba(103, 225, 193, 0.95);
+        box-shadow: 0 0 0 1px rgba(13, 22, 30, 0.9) inset, 0 0 22px rgba(103, 225, 193, 0.25);
+        border-radius: 4px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rect"></div>
+    <script>
+      (() => {
+        const q = new URLSearchParams(window.location.search);
+        const vx = Number(q.get("vx") || 0);
+        const vy = Number(q.get("vy") || 0);
+        const x = Number(q.get("x") || 0);
+        const y = Number(q.get("y") || 0);
+        const w = Math.max(2, Number(q.get("w") || 2));
+        const h = Math.max(2, Number(q.get("h") || 2));
+
+        const rect = document.getElementById("rect");
+        rect.style.left = `${Math.round(x - vx)}px`;
+        rect.style.top = `${Math.round(y - vy)}px`;
+        rect.style.width = `${Math.round(w)}px`;
+        rect.style.height = `${Math.round(h)}px`;
+      })();
+    </script>
+  </body>
+</html>

@@ -14,14 +14,11 @@
         <p class="muted">Record screen + interactions, then add zoom and text overlays.</p>
 
         <div class="row">
-          <button id="startBtn">Start Capture</button>
-          <button id="stopBtn" disabled>Stop</button>
-          <button id="downloadBtn" disabled>Download WebM</button>
           <button id="exportFinalBtn" disabled>Export Final Video</button>
+          <button id="saveProjectBtn" disabled>Download Project JSON</button>
         </div>
 
         <div class="row">
-          <button id="saveProjectBtn" disabled>Download Project JSON</button>
           <label class="file-input">
             Load Project JSON
             <input id="loadProjectInput" type="file" accept="application/json" />
@@ -45,6 +42,23 @@
           <button id="playPauseBtn">Play</button>
           <input id="seekBar" type="range" min="0" max="1000" step="1" value="0" />
           <span id="timeLabel">00:00 / 00:00</span>
+        </div>
+        <div class="effects-timeline" id="effectsTimeline">
+          <div class="timeline-header">
+            <span>Effects Timeline</span>
+            <span class="muted">Click to seek</span>
+          </div>
+          <div class="timeline-surface" id="timelineSurface">
+            <div class="timeline-lane">
+              <span class="timeline-name">Zoom</span>
+              <div class="timeline-track" id="zoomTrack"></div>
+            </div>
+            <div class="timeline-lane">
+              <span class="timeline-name">Text</span>
+              <div class="timeline-track" id="textTrack"></div>
+            </div>
+            <div class="timeline-playhead" id="timelinePlayhead"></div>
+          </div>
         </div>
       </section>
 

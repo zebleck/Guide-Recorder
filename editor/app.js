@@ -1,7 +1,4 @@
-﻿const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
-const downloadBtn = document.getElementById("downloadBtn");
-const exportFinalBtn = document.getElementById("exportFinalBtn");
+﻿const exportFinalBtn = document.getElementById("exportFinalBtn");
 const saveProjectBtn = document.getElementById("saveProjectBtn");
 const loadProjectInput = document.getElementById("loadProjectInput");
 const loadVideoInput = document.getElementById("loadVideoInput");
@@ -9,6 +6,10 @@ const statusEl = document.getElementById("status");
 const playPauseBtn = document.getElementById("playPauseBtn");
 const seekBar = document.getElementById("seekBar");
 const timeLabel = document.getElementById("timeLabel");
+const timelineSurface = document.getElementById("timelineSurface");
+const timelinePlayhead = document.getElementById("timelinePlayhead");
+const zoomTrack = document.getElementById("zoomTrack");
+const textTrack = document.getElementById("textTrack");
 
 const videoEl = document.getElementById("previewVideo");
 const canvas = document.getElementById("overlayCanvas");
@@ -41,12 +42,7 @@ const cursorHotspotYInput = document.getElementById("cursorHotspotY");
 const cursorPreviewCanvas = document.getElementById("cursorPreviewCanvas");
 const cursorPreviewCtx = cursorPreviewCanvas.getContext("2d");
 
-let mediaRecorder = null;
-let mediaStream = null;
-let chunks = [];
-let recordingUrl = "";
 let importedVideoUrl = "";
-let recordStartMs = 0;
 let rafId = 0;
 let isSeeking = false;
 let previewFrameCanvas = null;
@@ -74,25 +70,11 @@ const project = {
   cursorHotspotY: 0,
 };
 
-const pointerState = {
-  x: 0,
-  y: 0,
-  inFrame: false,
-  xPct: 0,
-  yPct: 0,
-};
-
-const buttonDownSince = {
-  0: null,
-  2: null,
-};
-
 function setStatus(msg) {
   statusEl.textContent = msg;
 }
 
 function refreshActionButtons() {
-  downloadBtn.disabled = !project.recordedBlob;
   exportFinalBtn.disabled = !videoEl.src;
   playPauseBtn.disabled = !videoEl.src;
   seekBar.disabled = !videoEl.src;
@@ -116,10 +98,7 @@ function syncPlaybackUi() {
   }
   timeLabel.textContent = `${formatClock(cur)} / ${formatClock(dur)}`;
   playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
-}
-
-function nowMs() {
-  return performance.now();
+  updateTimelinePlayhead(cur, dur);
 }
 
 function effectiveDurationSecFor(sourceDuration) {
@@ -141,20 +120,68 @@ function clampPlaybackToEffectiveDuration() {
   videoEl.pause();
 }
 
-function recMs() {
-  return nowMs() - recordStartMs;
-}
-
-function pushEvent(evt) {
-  if (!recordStartMs) return;
-  project.events.push({
-    t: recMs(),
-    ...evt,
-  });
-}
-
 function formatSec(ms) {
   return (ms / 1000).toFixed(2);
+}
+
+function timelineDurationSec() {
+  const mediaDur = effectiveDurationSec();
+  let overlayDur = 0;
+  for (const z of project.zooms) {
+    overlayDur = Math.max(overlayDur, Number(z.endSec || 0));
+  }
+  for (const t of project.texts) {
+    overlayDur = Math.max(overlayDur, Number(t.endSec || 0));
+  }
+  return Math.max(mediaDur, overlayDur, 0.1);
+}
+
+function createTimelineSegment(kind, startSec, endSec, label, durSec) {
+  const start = Math.max(0, Number(startSec || 0));
+  const end = Math.max(start, Number(endSec || 0));
+  if (end <= start) return null;
+
+  const el = document.createElement("span");
+  el.className = `timeline-segment ${kind}`;
+  el.textContent = label;
+  el.style.left = `${(start / durSec) * 100}%`;
+  el.style.width = `${Math.max(0.6, ((end - start) / durSec) * 100)}%`;
+  el.title = `${label} (${start.toFixed(2)}s - ${end.toFixed(2)}s)`;
+  return el;
+}
+
+function renderEffectsTimeline() {
+  if (!zoomTrack || !textTrack) return;
+  zoomTrack.innerHTML = "";
+  textTrack.innerHTML = "";
+  const durSec = timelineDurationSec();
+
+  for (const z of project.zooms) {
+    const seg = createTimelineSegment(
+      "zoom",
+      z.startSec,
+      z.endSec,
+      `x${Number(z.scale || 1).toFixed(1)}`,
+      durSec
+    );
+    if (seg) zoomTrack.appendChild(seg);
+  }
+  for (const t of project.texts) {
+    const textLabel = String(t.value || "Text").trim() || "Text";
+    const seg = createTimelineSegment("text", t.startSec, t.endSec, textLabel, durSec);
+    if (seg) textTrack.appendChild(seg);
+  }
+
+  const cur = Number(videoEl.currentTime || 0);
+  const mediaDur = effectiveDurationSec();
+  updateTimelinePlayhead(cur, mediaDur > 0 ? mediaDur : durSec);
+}
+
+function updateTimelinePlayhead(curSec, durSec) {
+  if (!timelinePlayhead) return;
+  const dur = Math.max(0.001, Number(durSec || 0.001));
+  const p = Math.max(0, Math.min(1, Number(curSec || 0) / dur));
+  timelinePlayhead.style.left = `${p * 100}%`;
 }
 
 function fitCanvasToVideo() {
@@ -1048,98 +1075,6 @@ function stopRenderLoop() {
   videoEl.style.visibility = "visible";
 }
 
-function normalizePointerPosition(clientX, clientY) {
-  const vw = Math.max(1, window.innerWidth);
-  const vh = Math.max(1, window.innerHeight);
-  const clampedX = Math.min(vw, Math.max(0, clientX));
-  const clampedY = Math.min(vh, Math.max(0, clientY));
-
-  pointerState.inFrame = clientX >= 0 && clientX <= vw && clientY >= 0 && clientY <= vh;
-  pointerState.xPct = clampedX / vw;
-  pointerState.yPct = clampedY / vh;
-  pointerState.x = pointerState.xPct * canvas.width;
-  pointerState.y = pointerState.yPct * canvas.height;
-}
-
-function onMouseMove(e) {
-  normalizePointerPosition(e.clientX, e.clientY);
-  pushEvent({
-    type: "mouse_move",
-    x: pointerState.x,
-    y: pointerState.y,
-    xPct: pointerState.xPct,
-    yPct: pointerState.yPct,
-    inFrame: pointerState.inFrame,
-  });
-}
-
-function onMouseDown(e) {
-  normalizePointerPosition(e.clientX, e.clientY);
-  if (e.button === 0 || e.button === 2) buttonDownSince[e.button] = recMs();
-
-  pushEvent({
-    type: "mouse_down",
-    button: e.button,
-    x: pointerState.x,
-    y: pointerState.y,
-    xPct: pointerState.xPct,
-    yPct: pointerState.yPct,
-    inFrame: pointerState.inFrame,
-  });
-}
-
-function onMouseUp(e) {
-  normalizePointerPosition(e.clientX, e.clientY);
-
-  let holdMs = 0;
-  if ((e.button === 0 || e.button === 2) && buttonDownSince[e.button] != null) {
-    holdMs = recMs() - buttonDownSince[e.button];
-    buttonDownSince[e.button] = null;
-  }
-
-  pushEvent({
-    type: "mouse_up",
-    button: e.button,
-    holdMs,
-    x: pointerState.x,
-    y: pointerState.y,
-    xPct: pointerState.xPct,
-    yPct: pointerState.yPct,
-    inFrame: pointerState.inFrame,
-  });
-}
-
-function onKeyDown(e) {
-  pushEvent({ type: "key_down", key: e.key, code: e.code });
-}
-
-function onKeyUp(e) {
-  pushEvent({ type: "key_up", key: e.key, code: e.code });
-}
-
-function attachInteractionListeners() {
-  window.addEventListener("mousemove", onMouseMove);
-  window.addEventListener("mousedown", onMouseDown);
-  window.addEventListener("mouseup", onMouseUp);
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
-  window.addEventListener("mouseleave", onMouseLeave);
-  window.addEventListener("contextmenu", (e) => e.preventDefault());
-}
-
-function removeInteractionListeners() {
-  window.removeEventListener("mousemove", onMouseMove);
-  window.removeEventListener("mousedown", onMouseDown);
-  window.removeEventListener("mouseup", onMouseUp);
-  window.removeEventListener("keydown", onKeyDown);
-  window.removeEventListener("keyup", onKeyUp);
-  window.removeEventListener("mouseleave", onMouseLeave);
-}
-
-function onMouseLeave() {
-  pushEvent({ type: "mouse_move", inFrame: false });
-}
-
 function refreshZoomList() {
   zoomList.innerHTML = "";
   project.zooms.forEach((z, idx) => {
@@ -1155,6 +1090,7 @@ function refreshZoomList() {
     li.appendChild(btn);
     zoomList.appendChild(li);
   });
+  renderEffectsTimeline();
 }
 
 function refreshTextList() {
@@ -1172,6 +1108,7 @@ function refreshTextList() {
     li.appendChild(btn);
     textList.appendChild(li);
   });
+  renderEffectsTimeline();
 }
 
 function addZoomFromForm() {
@@ -1265,6 +1202,7 @@ async function applyLoadedProjectData(data) {
   await loadCursorTextureFromDataUrl(String(data.cursorTextureDataUrl || ""), project.cursorTextureName);
   refreshZoomList();
   refreshTextList();
+  renderEffectsTimeline();
 }
 
 async function loadProjectJson(file) {
@@ -1299,6 +1237,7 @@ async function tryDesktopAutoLoad() {
       fitCanvasToVideo();
       startRenderLoop();
       refreshActionButtons();
+      renderEffectsTimeline();
     };
     saveProjectBtn.disabled = false;
     refreshActionButtons();
@@ -1307,99 +1246,6 @@ async function tryDesktopAutoLoad() {
     setStatus("Desktop autoload failed. Load video/json manually.");
   }
 }
-
-async function startCapture() {
-  try {
-    setStatus("Selecting screen source...");
-    mediaStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: { ideal: 60, max: 60 },
-        cursor: "never",
-      },
-      audio: true,
-    });
-
-    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-      ? "video/webm;codecs=vp9"
-      : "video/webm";
-
-    chunks = [];
-    project.events = [];
-    buttonDownSince[0] = null;
-    buttonDownSince[2] = null;
-    project.recordedBlob = null;
-    project.recordedMimeType = mimeType;
-    recordStartMs = nowMs();
-
-    mediaRecorder = new MediaRecorder(mediaStream, { mimeType, videoBitsPerSecond: 12000000 });
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
-
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType });
-      project.recordedBlob = blob;
-      project.durationSec = (nowMs() - recordStartMs) / 1000;
-
-      if (recordingUrl) URL.revokeObjectURL(recordingUrl);
-      recordingUrl = URL.createObjectURL(blob);
-      videoEl.src = recordingUrl;
-      videoEl.onloadedmetadata = () => {
-        syncPreviewStageAspect();
-        fitCanvasToVideo();
-        startRenderLoop();
-        refreshActionButtons();
-      };
-
-      saveProjectBtn.disabled = false;
-      refreshActionButtons();
-      setStatus(`Recorded ${project.durationSec.toFixed(2)}s. Add edits and preview.`);
-    };
-
-    mediaRecorder.start(100);
-
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    saveProjectBtn.disabled = true;
-    refreshActionButtons();
-
-    attachInteractionListeners();
-    setStatus("Recording... interact with your screen.");
-
-    const [track] = mediaStream.getVideoTracks();
-    track.onended = () => {
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        stopCapture();
-      }
-    };
-  } catch (err) {
-    setStatus(`Capture failed: ${err.message || String(err)}`);
-  }
-}
-
-function stopCapture() {
-  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
-
-  mediaRecorder.stop();
-  removeInteractionListeners();
-
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-  }
-
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-}
-
-startBtn.addEventListener("click", startCapture);
-stopBtn.addEventListener("click", stopCapture);
-
-downloadBtn.addEventListener("click", () => {
-  if (!project.recordedBlob) return;
-  downloadBlob(project.recordedBlob, "guide-recorder-recording.webm");
-});
 
 saveProjectBtn.addEventListener("click", saveProjectJson);
 
@@ -1422,6 +1268,7 @@ loadVideoInput.addEventListener("change", async (e) => {
     fitCanvasToVideo();
     startRenderLoop();
     refreshActionButtons();
+    renderEffectsTimeline();
   };
   refreshActionButtons();
   setStatus(`Loaded video file: ${file.name}`);
@@ -1499,9 +1346,11 @@ videoEl.addEventListener("loadedmetadata", () => {
   syncPreviewStageAspect();
   fitCanvasToVideo();
   syncPlaybackUi();
+  renderEffectsTimeline();
 });
 videoEl.addEventListener("ended", syncPlaybackUi);
 window.addEventListener("resize", fitCanvasToVideo);
+window.addEventListener("resize", renderEffectsTimeline);
 
 playPauseBtn.addEventListener("click", async () => {
   if (!videoEl.src) return;
@@ -1532,10 +1381,22 @@ seekBar.addEventListener("change", () => {
   syncPlaybackUi();
 });
 
-setStatus("Idle. Start Capture to begin.");
+timelineSurface.addEventListener("pointerdown", (e) => {
+  if (!videoEl.src) return;
+  const dur = effectiveDurationSec();
+  if (!(dur > 0)) return;
+  const rect = timelineSurface.getBoundingClientRect();
+  const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+  videoEl.currentTime = dur * p;
+  syncPlaybackUi();
+  if (videoEl.paused) renderOverlay();
+});
+
+setStatus("Idle. Load recording JSON/video to begin editing.");
 refreshActionButtons();
 syncPlaybackUi();
 renderCursorPreviewCanvas();
+renderEffectsTimeline();
 loadCursorPrefsFromLocalStorage().finally(() => {
   tryDesktopAutoLoad();
 });

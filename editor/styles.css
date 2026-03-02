@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #101114;
   --panel: #171920;
   --panel-2: #1f2230;
@@ -56,8 +56,15 @@ h3 {
   margin-top: 10px;
 }
 
-.controls .row {
+.controls .row-toolbar {
   flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.controls .row-toolbar button,
+.controls .row-toolbar .file-input {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 button,

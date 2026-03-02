@@ -68,6 +68,54 @@ function beginResize(handle, x, y) {
   state.originRect = { ...state.rect };
 }
 
+function isCornerHandle(handle) {
+  return handle === "nw" || handle === "ne" || handle === "sw" || handle === "se";
+}
+
+function aspectLockedResize(handle, x, y, originRect) {
+  const minW = 80;
+  const minH = 80;
+  const aspect = Math.max(0.0001, originRect.width / Math.max(1, originRect.height));
+
+  const anchors = {
+    nw: { fx: originRect.x + originRect.width, fy: originRect.y + originRect.height, signX: -1, signY: -1 },
+    ne: { fx: originRect.x, fy: originRect.y + originRect.height, signX: +1, signY: -1 },
+    sw: { fx: originRect.x + originRect.width, fy: originRect.y, signX: -1, signY: +1 },
+    se: { fx: originRect.x, fy: originRect.y, signX: +1, signY: +1 },
+  };
+  const a = anchors[handle];
+  if (!a) return normalizeRect(originRect);
+
+  const rawW = Math.abs(x - a.fx);
+  const rawH = Math.abs(y - a.fy);
+
+  // Pick a target size driven by pointer movement while preserving aspect.
+  let width = rawW;
+  let height = width / aspect;
+  if (rawH > 0 && rawW / Math.max(1, rawH) < aspect) {
+    height = rawH;
+    width = height * aspect;
+  }
+
+  // Clamp size to min and available space from the fixed anchor.
+  const maxWByX = a.signX < 0 ? a.fx : window.innerWidth - a.fx;
+  const maxHByY = a.signY < 0 ? a.fy : window.innerHeight - a.fy;
+  const maxW = Math.max(1, Math.min(maxWByX, maxHByY * aspect));
+  const minWRequired = Math.max(minW, minH * aspect);
+  const targetW = clamp(width, Math.min(minWRequired, maxW), maxW);
+  const targetH = targetW / aspect;
+
+  const rx = a.signX < 0 ? a.fx - targetW : a.fx;
+  const ry = a.signY < 0 ? a.fy - targetH : a.fy;
+
+  return normalizeRect({
+    x: rx,
+    y: ry,
+    width: targetW,
+    height: targetH,
+  });
+}
+
 function onPointerDown(e) {
   const x = e.clientX;
   const y = e.clientY;
@@ -117,6 +165,12 @@ function onPointerMove(e) {
   }
 
   if (state.action === "resize") {
+    if (e.shiftKey && isCornerHandle(state.handle)) {
+      state.rect = aspectLockedResize(state.handle, x, y, state.originRect);
+      drawRect();
+      return;
+    }
+
     let { x: rx, y: ry, width: rw, height: rh } = state.originRect;
     const right = rx + rw;
     const bottom = ry + rh;

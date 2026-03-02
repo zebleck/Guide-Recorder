@@ -20,6 +20,10 @@
         border-radius: 4px;
         pointer-events: none;
       }
+      #rect.recording {
+        border-color: rgba(245, 93, 118, 0.95);
+        box-shadow: 0 0 0 1px rgba(34, 12, 17, 0.92) inset, 0 0 22px rgba(245, 93, 118, 0.22);
+      }
     </style>
   </head>
   <body>
@@ -33,12 +37,15 @@
         const y = Number(q.get("y") || 0);
         const w = Math.max(2, Number(q.get("w") || 2));
         const h = Math.max(2, Number(q.get("h") || 2));
+        const recording = q.get("recording") === "1";
+        const outset = recording ? 3 : 0;
 
         const rect = document.getElementById("rect");
-        rect.style.left = `${Math.round(x - vx)}px`;
-        rect.style.top = `${Math.round(y - vy)}px`;
-        rect.style.width = `${Math.round(w)}px`;
-        rect.style.height = `${Math.round(h)}px`;
+        if (recording) rect.classList.add("recording");
+        rect.style.left = `${Math.round(x - vx - outset)}px`;
+        rect.style.top = `${Math.round(y - vy - outset)}px`;
+        rect.style.width = `${Math.round(w + outset * 2)}px`;
+        rect.style.height = `${Math.round(h + outset * 2)}px`;
       })();
     </script>
   </body>

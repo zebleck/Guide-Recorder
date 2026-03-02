@@ -43,7 +43,8 @@ function fitDockWindow() {
 
 function syncAreaPreview() {
   return window.recorderApi.setAreaPreview({
-    enabled: Boolean(useSelectedArea && selectedArea && !isRecording),
+    enabled: Boolean(useSelectedArea && selectedArea),
+    recording: Boolean(isRecording),
     bounds: useSelectedArea && selectedArea ? selectedArea : null,
   }).catch(() => {});
 }
@@ -102,7 +103,7 @@ async function startRecording() {
     sourceId: src.id,
     sourceName: src.name,
     hideNativeCursor: true,
-    autoOpenEditor: false,
+    autoOpenEditor: true,
     selectionBounds: useSelectedArea ? selectedArea : null,
   });
 

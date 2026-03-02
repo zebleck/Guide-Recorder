@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, ipcMain, desktopCapturer, screen, shell, globalShortcut } = require("electron");
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, shell, globalShortcut, nativeImage } = require("electron");
 const fsNative = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -23,6 +23,7 @@ let latestSaved = {
 };
 
 const editorRoot = path.resolve(__dirname, "..", "editor");
+const appLogoPath = path.resolve(__dirname, "..", "logo.svg");
 const STOP_HOTKEY = "CommandOrControl+Shift+X";
 const FFMPEG_PRESET = "veryfast";
 const FFMPEG_CRF = "16";
@@ -40,6 +41,7 @@ try {
 }
 
 function createWindow() {
+  const windowIcon = nativeImage.createFromPath(appLogoPath);
   mainWindow = new BrowserWindow({
     width: 520,
     height: 64,
@@ -47,6 +49,7 @@ function createWindow() {
     show: false,
     resizable: false,
     alwaysOnTop: true,
+    icon: windowIcon.isEmpty() ? appLogoPath : windowIcon,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -156,15 +159,25 @@ function openSelectorWindow() {
 }
 
 function closeAreaPreviewWindow() {
-  if (!areaPreviewWindow || areaPreviewWindow.isDestroyed()) {
-    areaPreviewWindow = null;
-    return;
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w === mainWindow || w === selectorWindow) continue;
+    let shouldClose = false;
+    try {
+      shouldClose = Boolean(w.__guideRecorderAreaPreview) || w.getTitle() === "Area Preview";
+    } catch {
+      shouldClose = false;
+    }
+    if (!shouldClose) continue;
+    try {
+      w.close();
+    } catch {
+      // ignore
+    }
   }
-  areaPreviewWindow.close();
   areaPreviewWindow = null;
 }
 
-function openAreaPreviewWindow(bounds) {
+function openAreaPreviewWindow(bounds, recording = false) {
   const v = virtualDesktopBounds();
   closeAreaPreviewWindow();
   areaPreviewWindow = new BrowserWindow({
@@ -184,6 +197,7 @@ function openAreaPreviewWindow(bounds) {
       nodeIntegration: false,
     },
   });
+  areaPreviewWindow.__guideRecorderAreaPreview = true;
 
   areaPreviewWindow.setMenuBarVisibility(false);
   areaPreviewWindow.setAlwaysOnTop(true, "floating");
@@ -196,6 +210,7 @@ function openAreaPreviewWindow(bounds) {
       y: String(Math.round(bounds.y)),
       w: String(Math.round(bounds.width)),
       h: String(Math.round(bounds.height)),
+      recording: recording ? "1" : "0",
     },
   });
   areaPreviewWindow.on("closed", () => {
@@ -692,6 +707,7 @@ ipcMain.handle("recorder:pickArea", async () => {
 
 ipcMain.handle("recorder:setAreaPreview", async (_evt, payload) => {
   const enabled = Boolean(payload?.enabled);
+  const recording = Boolean(payload?.recording);
   const b = payload?.bounds;
   const hasBounds =
     b &&
@@ -712,7 +728,7 @@ ipcMain.handle("recorder:setAreaPreview", async (_evt, payload) => {
     y: Number(b.y),
     width: Number(b.width),
     height: Number(b.height),
-  });
+  }, recording);
   return { ok: true, visible: true };
 });
 
@@ -1009,11 +1025,4 @@ app.on("window-all-closed", () => {
   closeAreaPreviewWindow();
   if (process.platform !== "darwin") app.quit();
 });
-
-
-
-
-
-
-
 

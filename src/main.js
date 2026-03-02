@@ -21,7 +21,7 @@ let latestSaved = {
   jsonPath: "",
 };
 
-const editorRoot = path.resolve(__dirname, "..", "..", "Guide-Recorder-Editor");
+const editorRoot = path.resolve(__dirname, "..", "editor");
 const STOP_HOTKEY = "CommandOrControl+Shift+X";
 
 function notifyRecordingStopped(result) {
@@ -926,6 +926,7 @@ app.on("will-quit", () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
 
 
 

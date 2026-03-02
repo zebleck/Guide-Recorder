@@ -1301,7 +1301,7 @@ function renderOverlay() {
     else seekBar.value = "0";
   }
   timeLabel.textContent = `${formatClock(uiSec)} / ${formatClock(dur)}`;
-  playPauseBtn.textContent = "Pause";
+  playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
   const frame = ensurePreviewFrameBuffer(canvas.width, canvas.height);
 
   renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height);

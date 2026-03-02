@@ -722,7 +722,7 @@ input:focus {
 .timeline-lane {
   display: grid;
   grid-template-columns: 64px 1fr;
-  min-height: 40px;
+  min-height: 52px;
   border-top: 1px solid var(--stroke-subtle);
 }
 
@@ -801,15 +801,17 @@ input:focus {
 /* Timeline segments */
 .timeline-segment {
   position: absolute;
-  top: 6px;
-  height: 28px;
+  top: 8px;
+  height: 36px;
   border-radius: 8px;
   overflow: visible;
   white-space: nowrap;
-  padding: 5px 10px;
+  padding: 0 10px;
   font-size: 0.75rem;
   font-weight: 600;
-  line-height: 18px;
+  line-height: 36px;
+  display: flex;
+  align-items: center;
   cursor: pointer;
   user-select: none;
   transition:
@@ -834,8 +836,8 @@ input:focus {
 /* Ghost preview */
 .timeline-ghost {
   position: absolute;
-  top: 9px;
-  height: 22px;
+  top: 10px;
+  height: 32px;
   border-radius: 6px;
   pointer-events: none;
   opacity: 0.5;

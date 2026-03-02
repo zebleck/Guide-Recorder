@@ -53,6 +53,7 @@ let previewFrameCtx = null;
 let composeCanvas = null;
 let composeCtx = null;
 const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
+const CURSOR_PREFS_STORAGE_KEY = "guide-recorder.cursor-prefs.v1";
 let cursorTextureImage = null;
 let cursorPreviewMap = null;
 
@@ -250,6 +251,44 @@ function renderCursorPreviewCanvas() {
   };
 }
 
+function persistCursorPrefsToLocalStorage() {
+  try {
+    const payload = {
+      cursorTextureDataUrl: project.cursorTextureDataUrl || "",
+      cursorTextureName: project.cursorTextureName || "",
+      cursorHotspotX: Number(project.cursorHotspotX || 0),
+      cursorHotspotY: Number(project.cursorHotspotY || 0),
+    };
+    window.localStorage.setItem(CURSOR_PREFS_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage quota / privacy mode failures.
+  }
+}
+
+async function loadCursorPrefsFromLocalStorage() {
+  let raw = "";
+  try {
+    raw = window.localStorage.getItem(CURSOR_PREFS_STORAGE_KEY) || "";
+  } catch {
+    return;
+  }
+  if (!raw) return;
+
+  try {
+    const data = JSON.parse(raw);
+    project.cursorHotspotX = Number(data.cursorHotspotX || 0);
+    project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+    project.cursorTextureName = String(data.cursorTextureName || "");
+    syncCursorHotspotInputs();
+    await loadCursorTextureFromDataUrl(
+      String(data.cursorTextureDataUrl || ""),
+      project.cursorTextureName
+    );
+  } catch {
+    // Ignore malformed stored data.
+  }
+}
+
 async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
   if (!dataUrl) {
     cursorTextureImage = null;
@@ -259,6 +298,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
     project.cursorHotspotY = 0;
     syncCursorHotspotInputs();
     renderCursorPreviewCanvas();
+    persistCursorPrefsToLocalStorage();
     return;
   }
 
@@ -274,6 +314,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "") {
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
+  persistCursorPrefsToLocalStorage();
 }
 
 async function readFileAsDataUrl(file) {
@@ -1351,12 +1392,14 @@ cursorHotspotXInput.addEventListener("input", () => {
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
+  persistCursorPrefsToLocalStorage();
 });
 cursorHotspotYInput.addEventListener("input", () => {
   project.cursorHotspotY = Number(cursorHotspotYInput.value || 0);
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
+  persistCursorPrefsToLocalStorage();
 });
 cursorTextureInput.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
@@ -1389,6 +1432,7 @@ cursorPreviewCanvas.addEventListener("click", (e) => {
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
+  persistCursorPrefsToLocalStorage();
 });
 
 videoEl.addEventListener("play", startRenderLoop);
@@ -1436,7 +1480,9 @@ setStatus("Idle. Start Capture to begin.");
 refreshActionButtons();
 syncPlaybackUi();
 renderCursorPreviewCanvas();
-tryDesktopAutoLoad();
+loadCursorPrefsFromLocalStorage().finally(() => {
+  tryDesktopAutoLoad();
+});
 
 
 

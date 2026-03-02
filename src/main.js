@@ -71,6 +71,40 @@ function virtualDesktopBounds() {
   };
 }
 
+function dipPointToScreenPoint(p) {
+  try {
+    const out = screen.dipToScreenPoint({
+      x: Math.round(Number(p?.x || 0)),
+      y: Math.round(Number(p?.y || 0)),
+    });
+    return { x: Number(out.x || 0), y: Number(out.y || 0) };
+  } catch {
+    return { x: Math.round(Number(p?.x || 0)), y: Math.round(Number(p?.y || 0)) };
+  }
+}
+
+function dipRectToScreenRect(rect) {
+  const x = Number(rect?.x || 0);
+  const y = Number(rect?.y || 0);
+  const w = Math.max(1, Number(rect?.width || 1));
+  const h = Math.max(1, Number(rect?.height || 1));
+
+  const tl = dipPointToScreenPoint({ x, y });
+  const br = dipPointToScreenPoint({ x: x + w, y: y + h });
+
+  const left = Math.min(tl.x, br.x);
+  const top = Math.min(tl.y, br.y);
+  const right = Math.max(tl.x, br.x);
+  const bottom = Math.max(tl.y, br.y);
+
+  return {
+    x: Math.round(left),
+    y: Math.round(top),
+    width: Math.max(2, Math.round(right - left)),
+    height: Math.max(2, Math.round(bottom - top)),
+  };
+}
+
 function openSelectorWindow() {
   const v = virtualDesktopBounds();
   selectorState = {
@@ -162,13 +196,21 @@ function stopCursorSampler() {
 function startUiohookIfAvailable() {
   if (!uiohook || !activeSession) return false;
 
+  // uiohook button codes: 1=left, 2=right, 3=middle.
+  const mapHookButton = (raw) => {
+    if (raw === 1) return 0;
+    if (raw === 2) return 2;
+    if (raw === 3) return 1;
+    return 0;
+  };
+
   const onMouseDown = (e) => {
     const cursor = activeSession.lastCursor;
-    pushSessionEvent({ type: "mouse_down", button: e.button === 3 ? 2 : 0, ...(cursor || {}) });
+    pushSessionEvent({ type: "mouse_down", button: mapHookButton(e.button), ...(cursor || {}) });
   };
   const onMouseUp = (e) => {
     const cursor = activeSession.lastCursor;
-    pushSessionEvent({ type: "mouse_up", button: e.button === 3 ? 2 : 0, ...(cursor || {}) });
+    pushSessionEvent({ type: "mouse_up", button: mapHookButton(e.button), ...(cursor || {}) });
   };
   const onKeyDown = (e) => pushSessionEvent({ type: "key_down", keycode: e.keycode });
   const onKeyUp = (e) => pushSessionEvent({ type: "key_up", keycode: e.keycode });
@@ -361,10 +403,11 @@ async function verifyFfmpegAvailable() {
 }
 
 function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
-  const safeX = Math.max(0, Number(bounds?.x || 0));
-  const safeY = Math.max(0, Number(bounds?.y || 0));
-  const safeW = Math.max(320, Number(bounds?.width || 1920));
-  const safeH = Math.max(240, Number(bounds?.height || 1080));
+  const px = dipRectToScreenRect(bounds);
+  const safeX = Math.max(0, Number(px.x || 0));
+  const safeY = Math.max(0, Number(px.y || 0));
+  const safeW = Math.max(320, Number(px.width || 1920));
+  const safeH = Math.max(240, Number(px.height || 1080));
 
   return [
     "-y",
@@ -398,16 +441,17 @@ function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
 
 function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
   const evenFloor = (n) => Math.floor(Number(n || 0) / 2) * 2;
-  const v = virtualDesktopBounds();
-  const fullW = evenFloor(Math.max(320, Number(v.width || 1920)));
-  const fullH = evenFloor(Math.max(240, Number(v.height || 1080)));
-  const offX = evenFloor(Math.round(Number(v.x || 0)));
-  const offY = evenFloor(Math.round(Number(v.y || 0)));
+  const vPx = dipRectToScreenRect(virtualDesktopBounds());
+  const bPx = dipRectToScreenRect(bounds);
+  const fullW = evenFloor(Math.max(320, Number(vPx.width || 1920)));
+  const fullH = evenFloor(Math.max(240, Number(vPx.height || 1080)));
+  const offX = evenFloor(Math.round(Number(vPx.x || 0)));
+  const offY = evenFloor(Math.round(Number(vPx.y || 0)));
 
-  let cropX = evenFloor(Math.max(0, Math.min(fullW - 2, Math.round(Number(bounds.x || 0) - offX))));
-  let cropY = evenFloor(Math.max(0, Math.min(fullH - 2, Math.round(Number(bounds.y || 0) - offY))));
-  let cropW = evenFloor(Math.max(80, Math.min(fullW - cropX, Math.round(Number(bounds.width || 320)))));
-  let cropH = evenFloor(Math.max(80, Math.min(fullH - cropY, Math.round(Number(bounds.height || 240)))));
+  let cropX = evenFloor(Math.max(0, Math.min(fullW - 2, Math.round(Number(bPx.x || 0) - offX))));
+  let cropY = evenFloor(Math.max(0, Math.min(fullH - 2, Math.round(Number(bPx.y || 0) - offY))));
+  let cropW = evenFloor(Math.max(80, Math.min(fullW - cropX, Math.round(Number(bPx.width || 320)))));
+  let cropH = evenFloor(Math.max(80, Math.min(fullH - cropY, Math.round(Number(bPx.height || 240)))));
 
   // Keep crop rectangle valid after even rounding.
   if (cropX + cropW > fullW) cropW = evenFloor(fullW - cropX);

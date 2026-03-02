@@ -6,4 +6,12 @@ contextBridge.exposeInMainWorld("recorderApi", {
   fitWindow: (payload) => ipcRenderer.invoke("recorder:fitWindow", payload),
   startRecording: (payload) => ipcRenderer.invoke("recorder:startRecording", payload),
   stopRecording: () => ipcRenderer.invoke("recorder:stopRecording"),
+  onRecordingStopped: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("recorder:recordingStopped", handler);
+    return () => {
+      ipcRenderer.removeListener("recorder:recordingStopped", handler);
+    };
+  },
 });

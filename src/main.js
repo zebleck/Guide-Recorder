@@ -24,6 +24,11 @@ let latestSaved = {
 const editorRoot = path.resolve(__dirname, "..", "..", "Guide-Recorder-Editor");
 const STOP_HOTKEY = "CommandOrControl+Shift+X";
 
+function notifyRecordingStopped(result) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("recorder:recordingStopped", result);
+}
+
 let uiohook = null;
 try {
   ({ uIOhook: uiohook } = require("uiohook-napi"));
@@ -249,6 +254,15 @@ function mimeFor(filePath) {
 
 async function ensureEditorServer() {
   if (editorServer) return `http://localhost:${editorServerPort}`;
+
+  const editorIndexPath = path.join(editorRoot, "index.html");
+  try {
+    await fs.access(editorIndexPath);
+  } catch {
+    throw new Error(
+      `Editor app not found at ${editorRoot}. Expected file: ${editorIndexPath}`
+    );
+  }
 
   editorServer = http.createServer(async (req, res) => {
     try {
@@ -655,11 +669,13 @@ ipcMain.on("selector:cancel", () => {
 
 async function stopRecordingInternal() {
   if (!activeSession || !activeSession.ffmpegProcess) {
+    const result = { ok: false, reason: "No active recording" };
+    notifyRecordingStopped(result);
     if (mainWindow) {
       mainWindow.show();
       mainWindow.focus();
     }
-    return { ok: false, reason: "No active recording" };
+    return result;
   }
 
   const session = activeSession;
@@ -672,15 +688,17 @@ async function stopRecordingInternal() {
   if (!ready) {
     const diagnostics = (session.ffmpegStderr || "").trim().slice(-3000);
     activeSession = null;
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-    return {
+    const result = {
       ok: false,
       reason: "Recording file did not finalize in time. Try a slightly longer recording.",
       ffmpegDiagnostics: diagnostics,
     };
+    notifyRecordingStopped(result);
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    return result;
   }
 
   const durationSec = (performance.now() - session.startPerf) / 1000;
@@ -704,10 +722,15 @@ async function stopRecordingInternal() {
   };
 
   let editorUrl = "";
+  let editorOpenError = "";
   if (session.autoOpenEditor) {
-    const baseUrl = await ensureEditorServer();
-    editorUrl = `${baseUrl}/?autoloaddesktop=1&t=${Date.now()}`;
-    await shell.openExternal(editorUrl);
+    try {
+      const baseUrl = await ensureEditorServer();
+      editorUrl = `${baseUrl}/?autoloaddesktop=1&t=${Date.now()}`;
+      await shell.openExternal(editorUrl);
+    } catch (err) {
+      editorOpenError = err?.message || String(err);
+    }
   }
 
   const ffmpegDiagnostics = session.ffmpegStderr;
@@ -717,16 +740,19 @@ async function stopRecordingInternal() {
     mainWindow.focus();
   }
 
-  return {
+  const result = {
     ok: true,
     durationSec,
     videoPath: latestSaved.videoPath,
     jsonPath: latestSaved.jsonPath,
     editorUrl,
+    editorOpenError,
     hideNativeCursor: session.hideNativeCursor,
     usingUiohook: Boolean(session.usingUiohook),
     ffmpegDiagnostics,
   };
+  notifyRecordingStopped(result);
+  return result;
 }
 
 ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
@@ -886,7 +912,14 @@ ipcMain.handle("recorder:stopRecording", async () => {
   return await stopRecordingInternal();
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  createWindow();
+  try {
+    await ensureEditorServer();
+  } catch {
+    // Keep app usable for recording; open/save status will show editor error on stop.
+  }
+});
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
 });

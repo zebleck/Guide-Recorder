@@ -13,6 +13,8 @@ let isRecording = false;
 let lastStartInfo = null;
 let selectedArea = null;
 let fittedOnce = false;
+const STOP_ACTIVE_LABEL = "Stop + Save";
+const STOP_IDLE_LABEL = "Stopped";
 
 function fitDockWindow() {
   if (fittedOnce) return;
@@ -47,6 +49,33 @@ function shortDiag(raw) {
   if (!s) return "";
   const lines = s.split(/\r?\n/).filter(Boolean);
   return lines.slice(-8).join("\n");
+}
+
+function applyStoppedUiState() {
+  isRecording = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  stopBtn.textContent = STOP_IDLE_LABEL;
+}
+
+function renderStopResult(result) {
+  applyStoppedUiState();
+  if (!result?.ok) {
+    const diag = shortDiag(result?.ffmpegDiagnostics);
+    setStatus(
+      `Stop failed: ${result?.reason || "Unknown error"}${diag ? `\n\nffmpeg:\n${diag}` : ""}`
+    );
+    return;
+  }
+
+  const openInfo = result.editorUrl
+    ? `Editor opened: ${result.editorUrl}`
+    : result.editorOpenError
+      ? `Editor open failed: ${result.editorOpenError}`
+      : "Editor auto-open disabled.";
+  setStatus(
+    `Saved:\n${result.videoPath}\n${result.jsonPath}\nDuration: ${result.durationSec.toFixed(2)}s\n${openInfo}`
+  );
 }
 
 function refreshAreaInfo() {
@@ -107,6 +136,7 @@ async function startRecording() {
     lastStartInfo = result;
     startBtn.disabled = true;
     stopBtn.disabled = false;
+    stopBtn.textContent = STOP_ACTIVE_LABEL;
 
     const hookInfo = result.usingUiohook
       ? "Global click/key: enabled"
@@ -156,25 +186,9 @@ async function stopRecording() {
     setStatus("Stopping native capture and writing session...");
 
     const result = await window.recorderApi.stopRecording();
-    isRecording = false;
-    startBtn.disabled = false;
-
-    if (!result.ok) {
-      const diag = shortDiag(result.ffmpegDiagnostics);
-      setStatus(
-        `Stop failed: ${result.reason || "Unknown error"}${diag ? `\n\nffmpeg:\n${diag}` : ""}`
-      );
-      return;
-    }
-
-    const openInfo = result.editorUrl ? `Editor opened: ${result.editorUrl}` : "Editor auto-open disabled.";
-    setStatus(
-      `Saved:\n${result.videoPath}\n${result.jsonPath}\nDuration: ${result.durationSec.toFixed(2)}s\n${openInfo}`
-    );
+    renderStopResult(result);
   } catch (err) {
-    isRecording = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    applyStoppedUiState();
     setStatus(`Stop failed: ${err.message || String(err)}`);
   }
 }
@@ -183,6 +197,9 @@ refreshBtn.addEventListener("click", loadSources);
 selectAreaBtn.addEventListener("click", pickArea);
 startBtn.addEventListener("click", startRecording);
 stopBtn.addEventListener("click", stopRecording);
+window.recorderApi.onRecordingStopped((result) => {
+  renderStopResult(result);
+});
 
 window.addEventListener("beforeunload", () => {
   if (isRecording) {
@@ -192,4 +209,5 @@ window.addEventListener("beforeunload", () => {
 
 loadSources().catch((err) => setStatus(`Source listing failed: ${err.message || String(err)}`));
 refreshAreaInfo();
+applyStoppedUiState();
 window.addEventListener("load", () => setTimeout(fitDockWindow, 0));

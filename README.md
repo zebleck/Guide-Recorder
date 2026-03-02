@@ -20,6 +20,9 @@ npm.cmd start
 ## Requirements
 
 - `ffmpeg` must be installed and available on PATH.
+- The browser editor repo must exist at sibling path:
+  - `C:\Users\zeble\Github Repos\Guide-Recorder-Editor`
+  - Required file: `index.html`
 
 ## Notes
 
@@ -29,6 +32,6 @@ npm.cmd start
 - Dock keeps recorder lightweight: no editor and no timeline UI.
 - Global cursor timeline is captured via Electron.
 - Global click/key events use optional `uiohook-napi` when available.
-- Browser editor is served locally by the dock at `http://localhost:5190`.
+- Browser editor server starts with `npm start` and serves at `http://localhost:5190`.
 - Recordings are auto-saved in `Videos/Guide-Recorder`.
 

@@ -117,7 +117,6 @@ async function startRecording() {
   startBtn.disabled = true;
   stopBtn.disabled = false;
   setStopButtonState(true);
-  syncAreaPreview();
 }
 
 async function toggleArea() {

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Countdown</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      #count {
+        position: absolute;
+        width: 84px;
+        height: 84px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 42px;
+        font-weight: 700;
+        color: #f4f7ff;
+        background: rgba(17, 27, 41, 0.72);
+        border: 2px solid rgba(116, 226, 191, 0.9);
+        box-shadow: 0 0 28px rgba(116, 226, 191, 0.26);
+        pointer-events: none;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="count">3</div>
+    <script>
+      (() => {
+        const q = new URLSearchParams(window.location.search);
+        const vx = Number(q.get("vx") || 0);
+        const vy = Number(q.get("vy") || 0);
+        const x = Number(q.get("x") || 0);
+        const y = Number(q.get("y") || 0);
+        const w = Math.max(2, Number(q.get("w") || 2));
+        const h = Math.max(2, Number(q.get("h") || 2));
+        let left = Math.round(x - vx + w / 2 - 42);
+        let top = Math.round(y - vy + h / 2 - 42);
+
+        const el = document.getElementById("count");
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+
+        let n = Math.max(1, Math.round(Number(q.get("seconds") || 3)));
+        el.textContent = String(n);
+        const timer = setInterval(() => {
+          n -= 1;
+          if (n <= 0) {
+            clearInterval(timer);
+            return;
+          }
+          el.textContent = String(n);
+        }, 1000);
+      })();
+    </script>
+  </body>
+</html>

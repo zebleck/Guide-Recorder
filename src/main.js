@@ -13,6 +13,7 @@ app.commandLine.appendSwitch("log-level", "3");
 let mainWindow = null;
 let selectorWindow = null;
 let areaPreviewWindow = null;
+let countdownWindow = null;
 let selectorState = null;
 let activeSession = null;
 let editorServer = null;
@@ -202,6 +203,11 @@ function openAreaPreviewWindow(bounds, recording = false) {
   areaPreviewWindow.setMenuBarVisibility(false);
   areaPreviewWindow.setAlwaysOnTop(true, "floating");
   areaPreviewWindow.setIgnoreMouseEvents(true, { forward: true });
+  try {
+    areaPreviewWindow.setContentProtection(true);
+  } catch {
+    // Best effort; unsupported on some platforms/runtime combinations.
+  }
   areaPreviewWindow.loadFile(path.join(__dirname, "area-preview.html"), {
     query: {
       vx: String(v.x),
@@ -216,6 +222,63 @@ function openAreaPreviewWindow(bounds, recording = false) {
   areaPreviewWindow.on("closed", () => {
     areaPreviewWindow = null;
   });
+}
+
+function closeCountdownWindow() {
+  if (!countdownWindow || countdownWindow.isDestroyed()) {
+    countdownWindow = null;
+    return;
+  }
+  countdownWindow.close();
+  countdownWindow = null;
+}
+
+async function showStartCountdown(bounds, seconds = 3) {
+  const v = virtualDesktopBounds();
+  const countdownSeconds = Math.max(1, Math.round(seconds));
+  closeCountdownWindow();
+  countdownWindow = new BrowserWindow({
+    x: v.x,
+    y: v.y,
+    width: v.width,
+    height: v.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  countdownWindow.setMenuBarVisibility(false);
+  countdownWindow.setAlwaysOnTop(true, "floating");
+  countdownWindow.setIgnoreMouseEvents(true, { forward: true });
+  const loadPromise = countdownWindow.loadFile(path.join(__dirname, "countdown.html"), {
+    query: {
+      vx: String(v.x),
+      vy: String(v.y),
+      x: String(Math.round(bounds.x)),
+      y: String(Math.round(bounds.y)),
+      w: String(Math.round(bounds.width)),
+      h: String(Math.round(bounds.height)),
+      seconds: String(countdownSeconds),
+    },
+  });
+
+  try {
+    await loadPromise;
+  } catch {
+    // If overlay fails to load for any reason, continue after the same delay.
+  }
+  await new Promise((resolve) => {
+    setTimeout(resolve, countdownSeconds * 1000);
+  });
+  closeCountdownWindow();
 }
 
 function clamp01(v) {
@@ -243,6 +306,7 @@ function mapDisplayFromSource(sourceId) {
 
 function pushSessionEvent(evt) {
   if (!activeSession) return;
+  if (!Number.isFinite(activeSession.startPerf)) return;
   activeSession.events.push({ t: performance.now() - activeSession.startPerf, ...evt });
 }
 
@@ -775,6 +839,7 @@ async function stopRecordingInternal() {
   }
 
   const session = activeSession;
+  closeCountdownWindow();
   stopCursorSampler();
   stopUiohook();
   globalShortcut.unregister(STOP_HOTKEY);
@@ -885,7 +950,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
     activeSession = {
       sourceId,
       sourceName: payload?.sourceName || sourceId,
-      startPerf: performance.now(),
+      startPerf: null,
       captureBounds,
       events: [],
       lastCursor: null,
@@ -899,6 +964,17 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       ffmpegStderr: "",
       usingUiohook: false,
     };
+
+    closeAreaPreviewWindow();
+    if (mainWindow) mainWindow.hide();
+    if (hasSelection) {
+      openAreaPreviewWindow(activeSession.captureBounds, false);
+    }
+    await showStartCountdown(activeSession.captureBounds, 3);
+    activeSession.startPerf = performance.now();
+    if (hasSelection) {
+      openAreaPreviewWindow(activeSession.captureBounds, true);
+    }
 
     const usingUiohook = startUiohookIfAvailable();
     activeSession.usingUiohook = usingUiohook;
@@ -938,6 +1014,13 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         stopCursorSampler();
         stopUiohook();
         activeSession = null;
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        if (hasSelection) {
+          openAreaPreviewWindow(captureBounds, false);
+        }
         return {
           ok: false,
           reason:
@@ -968,6 +1051,13 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         stopCursorSampler();
         stopUiohook();
         activeSession = null;
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+        if (hasSelection) {
+          openAreaPreviewWindow(captureBounds, false);
+        }
         return {
           ok: false,
           reason:
@@ -979,8 +1069,6 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       captureMode = "full-desktop-fallback";
     }
 
-    closeAreaPreviewWindow();
-    if (mainWindow) mainWindow.hide();
     globalShortcut.unregister(STOP_HOTKEY);
     const stopHotkeyRegistered = globalShortcut.register(STOP_HOTKEY, () => {
       stopRecordingInternal().catch(() => {});
@@ -995,10 +1083,15 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       stopHotkeyRegistered,
     };
   } catch (err) {
+    closeCountdownWindow();
     if (activeSession) {
       stopCursorSampler();
       stopUiohook();
       activeSession = null;
+    }
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
     }
     globalShortcut.unregister(STOP_HOTKEY);
     return { ok: false, reason: err.message || String(err) };
@@ -1018,10 +1111,12 @@ app.whenReady().then(async () => {
   }
 });
 app.on("will-quit", () => {
+  closeCountdownWindow();
   closeAreaPreviewWindow();
   globalShortcut.unregisterAll();
 });
 app.on("window-all-closed", () => {
+  closeCountdownWindow();
   closeAreaPreviewWindow();
   if (process.platform !== "darwin") app.quit();
 });

@@ -13,6 +13,7 @@ const timeLabel = document.getElementById("timeLabel");
 const videoEl = document.getElementById("previewVideo");
 const canvas = document.getElementById("overlayCanvas");
 const ctx = canvas.getContext("2d");
+const previewStageEl = document.getElementById("previewStage");
 const keyPill = document.getElementById("liveKeyPill");
 
 const addZoomBtn = document.getElementById("addZoomBtn");
@@ -140,6 +141,13 @@ function fitCanvasToVideo() {
   const rect = videoEl.getBoundingClientRect();
   canvas.width = Math.max(1, Math.floor(rect.width));
   canvas.height = Math.max(1, Math.floor(rect.height));
+}
+
+function syncPreviewStageAspect() {
+  const vw = Number(videoEl.videoWidth || 0);
+  const vh = Number(videoEl.videoHeight || 0);
+  if (!previewStageEl || vw <= 0 || vh <= 0) return;
+  previewStageEl.style.aspectRatio = `${vw} / ${vh}`;
 }
 
 function videoContentRect() {
@@ -976,14 +984,11 @@ function renderOverlay() {
 
   fitCanvasToVideo();
   const currentMs = Math.max(0, videoEl.currentTime * 1000);
-  const contentRect = videoContentRect();
-  const frame = ensurePreviewFrameBuffer(contentRect.width, contentRect.height);
+  const frame = ensurePreviewFrameBuffer(canvas.width, canvas.height);
 
   renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height);
   clearOverlay();
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(frame.canvas, contentRect.x, contentRect.y, contentRect.width, contentRect.height);
+  ctx.drawImage(frame.canvas, 0, 0, canvas.width, canvas.height);
 
   rafId = requestAnimationFrame(renderOverlay);
 }
@@ -1249,6 +1254,7 @@ async function tryDesktopAutoLoad() {
     importedVideoUrl = `/__desktop/latest.video?t=${Date.now()}`;
     videoEl.src = importedVideoUrl;
     videoEl.onloadedmetadata = () => {
+      syncPreviewStageAspect();
       fitCanvasToVideo();
       startRenderLoop();
       refreshActionButtons();
@@ -1299,6 +1305,7 @@ async function startCapture() {
       recordingUrl = URL.createObjectURL(blob);
       videoEl.src = recordingUrl;
       videoEl.onloadedmetadata = () => {
+        syncPreviewStageAspect();
         fitCanvasToVideo();
         startRenderLoop();
         refreshActionButtons();
@@ -1370,6 +1377,7 @@ loadVideoInput.addEventListener("change", async (e) => {
   importedVideoUrl = URL.createObjectURL(file);
   videoEl.src = importedVideoUrl;
   videoEl.onloadedmetadata = () => {
+    syncPreviewStageAspect();
     fitCanvasToVideo();
     startRenderLoop();
     refreshActionButtons();
@@ -1443,7 +1451,11 @@ videoEl.addEventListener("pause", () => {
 });
 videoEl.addEventListener("seeked", renderOverlay);
 videoEl.addEventListener("timeupdate", syncPlaybackUi);
-videoEl.addEventListener("loadedmetadata", syncPlaybackUi);
+videoEl.addEventListener("loadedmetadata", () => {
+  syncPreviewStageAspect();
+  fitCanvasToVideo();
+  syncPlaybackUi();
+});
 videoEl.addEventListener("ended", syncPlaybackUi);
 window.addEventListener("resize", fitCanvasToVideo);
 

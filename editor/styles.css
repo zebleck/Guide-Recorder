@@ -819,7 +819,7 @@ input:focus {
     filter 0.2s ease;
 }
 
-.timeline-segment:hover {
+.timeline-surface:not(.dragging) .timeline-segment:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
   filter: brightness(1.1);
@@ -888,9 +888,9 @@ input:focus {
 .timeline-remove-btn {
   position: absolute;
   top: 50%;
-  right: 6px;
-  width: 18px;
-  height: 18px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
   margin: 0;
   padding: 0;
   transform: translateY(-50%);
@@ -906,7 +906,15 @@ input:focus {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-  z-index: 4;
+  z-index: 10;
+}
+
+/* Larger invisible hit area */
+.timeline-remove-btn::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
 }
 
 .timeline-segment:hover .timeline-remove-btn,

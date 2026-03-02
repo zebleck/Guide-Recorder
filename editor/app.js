@@ -1104,7 +1104,6 @@ function renderExportFrame(renderCtx, sourceVideo, currentMs, width, height) {
   drawClickBurstsOn(composed.ctx, currentMs, width, height, null);
   drawCursorOn(composed.ctx, pointer);
   drawHeldButtonsOn(composed.ctx, currentMs);
-  drawTextOverlaysOn(composed.ctx, currentMs, width, height);
   drawKeyPillOn(composed.ctx, currentMs, width);
 
   // Pass 2: apply zoom to whole composed frame (video + overlays together).
@@ -1112,6 +1111,9 @@ function renderExportFrame(renderCtx, sourceVideo, currentMs, width, height) {
   renderCtx.fillStyle = "#000";
   renderCtx.fillRect(0, 0, width, height);
   drawZoomedVideoOn(renderCtx, composed.canvas, zoomViewport, width, height);
+
+  // Pass 3: draw text overlays on top of zoomed frame so they stay screen-fixed.
+  drawTextOverlaysOn(renderCtx, currentMs, width, height);
 }
 
 function preferredExportMimeType() {
@@ -1563,9 +1565,6 @@ function setLaneAddButtonPosition(kind, clientX) {
   const defaultDur = 2;
   let startSec = p * totalDur;
   let endSec = Math.min(totalDur, startSec + defaultDur);
-  if (endSec - startSec < defaultDur) {
-    startSec = Math.max(0, endSec - defaultDur);
-  }
   timelineHoverSec[kind] = startSec;
   const leftPct = (startSec / totalDur) * 100;
   const widthPct = Math.max(0.6, ((endSec - startSec) / totalDur) * 100);
@@ -1583,8 +1582,22 @@ function setLaneAddBlocked(kind, blocked) {
   if (blocked) ghostEl.classList.add("hidden");
 }
 
+function isPointerOverSegment(trackEl, clientX) {
+  const segments = trackEl.querySelectorAll(".timeline-segment");
+  for (const seg of segments) {
+    const rect = seg.getBoundingClientRect();
+    if (clientX >= rect.left && clientX <= rect.right) return true;
+  }
+  return false;
+}
+
 function onLanePointerMove(kind, e) {
-  const overSegment = Boolean(e.target?.closest(".timeline-segment"));
+  if (resizingEffect) {
+    setLaneAddBlocked(kind, true);
+    return;
+  }
+  const trackEl = kind === "zoom" ? zoomTrack : textTrack;
+  const overSegment = isPointerOverSegment(trackEl, e.clientX);
   setLaneAddBlocked(kind, overSegment);
   if (overSegment) return;
   setLaneAddButtonPosition(kind, e.clientX);
@@ -1592,10 +1605,12 @@ function onLanePointerMove(kind, e) {
 
 function addEffectAt(kind, atSec) {
   const startSec = Math.max(0, Number(atSec || 0));
+  const maxDur = timelineDurationSec();
+  const endSec = Math.min(maxDur, startSec + 2);
   if (kind === "zoom") {
     const z = {
       startSec,
-      endSec: startSec + 2,
+      endSec,
       scale: 1.8,
       easeMs: 180,
     };
@@ -1606,7 +1621,7 @@ function addEffectAt(kind, atSec) {
   }
   const t = {
     startSec,
-    endSec: startSec + 2,
+    endSec,
     xPct: 12,
     yPct: 12,
     value: "Text",
@@ -1665,6 +1680,17 @@ timelineSurface.addEventListener("click", (e) => {
     }
     return;
   }
+  // If click landed on a track area, add an effect instead of seeking.
+  const trackEl = e.target.closest(".timeline-track");
+  if (trackEl) {
+    const kind = trackEl === zoomTrack ? "zoom" : trackEl === textTrack ? "text" : null;
+    if (kind) {
+      const atSec = timeFromTrackPointer(trackEl, e.clientX);
+      addEffectAt(kind, atSec);
+      return;
+    }
+  }
+
   if (!videoEl.src) return;
   uiPrimedForPlayback = true;
   const dur = effectiveDurationSec();
@@ -1679,6 +1705,7 @@ timelineSurface.addEventListener("click", (e) => {
 });
 
 timelineSurface.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".timeline-remove-btn")) return;
   const segEl = e.target.closest(".timeline-segment");
   if (!segEl) return;
   const handleEl = e.target.closest(".timeline-handle");
@@ -1692,18 +1719,21 @@ timelineSurface.addEventListener("pointerdown", (e) => {
   const list = effectsFor(kind);
   const effect = list[index];
   const trackEl = kind === "zoom" ? zoomTrack : textTrack;
-  if (!effect || !trackEl || (side !== "left" && side !== "right")) return;
+  if (!effect || !trackEl) return;
+  const mode = (side === "left" || side === "right") ? side : "move";
   suppressNextSegmentClick = true;
   resizingEffect = {
     kind,
     effect,
-    side,
+    side: mode,
     trackEl,
     startClientX: e.clientX,
     origStart: Number(effect.startSec || 0),
     origEnd: Number(effect.endSec || 0),
     durSec: timelineDurationSec(),
+    moved: false,
   };
+  timelineSurface.classList.add("dragging");
 });
 
 window.addEventListener("pointermove", (e) => {
@@ -1712,29 +1742,39 @@ window.addEventListener("pointermove", (e) => {
   if (!effect) return;
   const dx = e.clientX - startClientX;
   const deltaSec = (dx / Math.max(1, trackEl.getBoundingClientRect().width)) * durSec;
-  if (side === "left") {
+  if (Math.abs(dx) > 2) resizingEffect.moved = true;
+  if (side === "move") {
+    const duration = origEnd - origStart;
+    let newStart = origStart + deltaSec;
+    newStart = Math.max(0, Math.min(durSec - duration, newStart));
+    effect.startSec = newStart;
+    effect.endSec = newStart + duration;
+    document.body.style.cursor = "grabbing";
+  } else if (side === "left") {
     effect.startSec = Math.max(0, Math.min(origEnd - MIN_EFFECT_DURATION_SEC, origStart + deltaSec));
+    document.body.style.cursor = "ew-resize";
   } else {
     effect.endSec = Math.max(origStart + MIN_EFFECT_DURATION_SEC, origEnd + deltaSec);
+    document.body.style.cursor = "ew-resize";
   }
   clampEffectBounds(effect);
   sortEffects();
   renderEffectsTimeline();
   syncPlaybackUi();
-  document.body.style.cursor = "ew-resize";
 });
 
 window.addEventListener("pointerup", () => {
   if (resizingEffect) {
-    suppressNextSegmentClick = true;
+    suppressNextSegmentClick = resizingEffect.moved;
   }
   resizingEffect = null;
   document.body.style.cursor = "";
+  timelineSurface.classList.remove("dragging");
 });
 
 timelineSurface.addEventListener("pointermove", (e) => {
   if (resizingEffect) {
-    timelineSurface.style.cursor = "ew-resize";
+    timelineSurface.style.cursor = resizingEffect.side === "move" ? "grabbing" : "ew-resize";
     return;
   }
   const segEl = e.target.closest(".timeline-segment");
@@ -1743,7 +1783,7 @@ timelineSurface.addEventListener("pointermove", (e) => {
     return;
   }
   const side = resizeSideFromPoint(segEl, e.clientX);
-  timelineSurface.style.cursor = side ? "ew-resize" : "pointer";
+  timelineSurface.style.cursor = side ? "ew-resize" : "grab";
 });
 
 timelineSurface.addEventListener("pointerleave", () => {

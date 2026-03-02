@@ -34,6 +34,17 @@ body {
   -webkit-app-region: drag;
 }
 
+.time {
+  min-width: 40px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8eefc;
+  letter-spacing: 0.3px;
+  font-variant-numeric: tabular-nums;
+  -webkit-app-region: drag;
+}
+
 .icon-btn {
   width: 30px;
   height: 30px;

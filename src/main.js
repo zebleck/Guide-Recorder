@@ -15,6 +15,7 @@ let selectorWindow = null;
 let areaPreviewWindow = null;
 let countdownWindow = null;
 let recordingControlsWindow = null;
+let recordingStateTicker = null;
 let selectorState = null;
 let activeSession = null;
 let editorServer = null;
@@ -192,6 +193,7 @@ function recordingStatePayload() {
   return {
     isRecording: Boolean(activeSession?.ffmpegProcess),
     isPaused: Boolean(activeSession?.isPaused),
+    elapsedMs: activeSession ? sessionElapsedMs(activeSession) : 0,
   };
 }
 
@@ -205,11 +207,24 @@ function notifyRecordingState() {
   }
 }
 
+function startRecordingStateTicker() {
+  stopRecordingStateTicker();
+  recordingStateTicker = setInterval(() => {
+    notifyRecordingState();
+  }, 200);
+}
+
+function stopRecordingStateTicker() {
+  if (!recordingStateTicker) return;
+  clearInterval(recordingStateTicker);
+  recordingStateTicker = null;
+}
+
 function openRecordingControlsWindow(bounds) {
   const v = virtualDesktopBounds();
   closeRecordingControlsWindow();
 
-  const width = 112;
+  const width = 142;
   const height = 44;
   const cx = Math.round(Number(bounds?.x || v.x) + Number(bounds?.width || v.width) / 2);
   let x = Math.round(cx - width / 2);
@@ -374,6 +389,32 @@ function normalizePointToBounds(point, bounds) {
   };
 }
 
+function isPointInRecordingControls(point) {
+  if (!recordingControlsWindow || recordingControlsWindow.isDestroyed()) return false;
+  if (!point) return false;
+  let b = null;
+  try {
+    b = recordingControlsWindow.getBounds();
+  } catch {
+    return false;
+  }
+  if (!b) return false;
+  return (
+    point.x >= b.x &&
+    point.x <= b.x + b.width &&
+    point.y >= b.y &&
+    point.y <= b.y + b.height
+  );
+}
+
+function cursorSnapshotForSession(session, pointOverride = null) {
+  if (!session) return null;
+  const point = pointOverride || screen.getCursorScreenPoint();
+  const norm = normalizePointToBounds(point, session.captureBounds);
+  if (!norm) return null;
+  return { x: point.x, y: point.y, ...norm };
+}
+
 function mapDisplayFromSource(sourceId) {
   const sourceDisplayId = Number(String(sourceId || "").split(":")[1]);
   if (!Number.isFinite(sourceDisplayId)) return screen.getPrimaryDisplay();
@@ -402,11 +443,11 @@ function startCursorSampler() {
   activeSession.cursorTimer = setInterval(() => {
     if (!activeSession) return;
     const point = screen.getCursorScreenPoint();
-    const norm = normalizePointToBounds(point, activeSession.captureBounds);
-    if (!norm) return;
-
-    activeSession.lastCursor = { x: point.x, y: point.y, ...norm };
-    pushSessionEvent({ type: "mouse_move", xScreen: point.x, yScreen: point.y, ...norm });
+    if (isPointInRecordingControls(point)) return;
+    const cursor = cursorSnapshotForSession(activeSession, point);
+    if (!cursor) return;
+    activeSession.lastCursor = cursor;
+    pushSessionEvent({ type: "mouse_move", xScreen: cursor.x, yScreen: cursor.y, ...cursor });
   }, 1000 / 60);
 }
 
@@ -429,11 +470,17 @@ function startUiohookIfAvailable() {
   };
 
   const onMouseDown = (e) => {
-    const cursor = activeSession.lastCursor;
+    const point = screen.getCursorScreenPoint();
+    if (isPointInRecordingControls(point)) return;
+    const cursor = cursorSnapshotForSession(activeSession, point) || activeSession.lastCursor;
+    if (cursor) activeSession.lastCursor = cursor;
     pushSessionEvent({ type: "mouse_down", button: mapHookButton(e.button), ...(cursor || {}) });
   };
   const onMouseUp = (e) => {
-    const cursor = activeSession.lastCursor;
+    const point = screen.getCursorScreenPoint();
+    if (isPointInRecordingControls(point)) return;
+    const cursor = cursorSnapshotForSession(activeSession, point) || activeSession.lastCursor;
+    if (cursor) activeSession.lastCursor = cursor;
     pushSessionEvent({ type: "mouse_up", button: mapHookButton(e.button), ...(cursor || {}) });
   };
   const onKeyDown = (e) => pushSessionEvent({ type: "key_down", keycode: e.keycode });
@@ -873,7 +920,6 @@ ipcMain.handle("recorder:togglePause", async () => {
     if (!activeSession.isPaused) {
       activeSession.isPaused = true;
       activeSession.pausedAtPerf = performance.now();
-      pushSessionEvent({ type: "mouse_move", inFrame: false });
     } else {
       const pausedAt = Number(activeSession.pausedAtPerf || 0);
       if (pausedAt > 0) {
@@ -963,6 +1009,8 @@ ipcMain.on("selector:cancel", () => {
 async function stopRecordingInternal() {
   if (!activeSession || !activeSession.ffmpegProcess) {
     closeRecordingControlsWindow();
+    stopRecordingStateTicker();
+    notifyRecordingState();
     const result = { ok: false, reason: "No active recording" };
     notifyRecordingStopped(result);
     if (mainWindow) {
@@ -984,6 +1032,8 @@ async function stopRecordingInternal() {
   if (!ready) {
     const diagnostics = (session.ffmpegStderr || "").trim().slice(-3000);
     activeSession = null;
+    stopRecordingStateTicker();
+    notifyRecordingState();
     const result = {
       ok: false,
       reason: "Recording file did not finalize in time. Try a slightly longer recording.",
@@ -1031,6 +1081,8 @@ async function stopRecordingInternal() {
 
   const ffmpegDiagnostics = session.ffmpegStderr;
   activeSession = null;
+  stopRecordingStateTicker();
+  notifyRecordingState();
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
@@ -1115,6 +1167,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
     }
     openRecordingControlsWindow(activeSession.captureBounds);
     notifyRecordingState();
+    startRecordingStateTicker();
 
     const usingUiohook = startUiohookIfAvailable();
     activeSession.usingUiohook = usingUiohook;
@@ -1155,6 +1208,8 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         stopUiohook();
         closeRecordingControlsWindow();
         activeSession = null;
+        stopRecordingStateTicker();
+        notifyRecordingState();
         if (mainWindow) {
           mainWindow.show();
           mainWindow.focus();
@@ -1193,6 +1248,8 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
         stopUiohook();
         closeRecordingControlsWindow();
         activeSession = null;
+        stopRecordingStateTicker();
+        notifyRecordingState();
         if (mainWindow) {
           mainWindow.show();
           mainWindow.focus();
@@ -1232,6 +1289,8 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       stopUiohook();
       activeSession = null;
     }
+    stopRecordingStateTicker();
+    notifyRecordingState();
     if (mainWindow) {
       mainWindow.show();
       mainWindow.focus();
@@ -1254,12 +1313,14 @@ app.whenReady().then(async () => {
   }
 });
 app.on("will-quit", () => {
+  stopRecordingStateTicker();
   closeRecordingControlsWindow();
   closeCountdownWindow();
   closeAreaPreviewWindow();
   globalShortcut.unregisterAll();
 });
 app.on("window-all-closed", () => {
+  stopRecordingStateTicker();
   closeRecordingControlsWindow();
   closeCountdownWindow();
   closeAreaPreviewWindow();

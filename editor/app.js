@@ -1111,7 +1111,14 @@ function drawZoomedVideoInRect(renderCtx, sourceVideo, zoomViewport, rect) {
   renderCtx.drawImage(sourceVideo, sx, sy, sw, sh, rect.x, rect.y, rect.width, rect.height);
 }
 
-function renderExportFrame(renderCtx, sourceVideo, currentMs, width, height) {
+function renderExportFrame(
+  renderCtx,
+  sourceVideo,
+  currentMs,
+  width,
+  height,
+  { showHoldInfo = true } = {},
+) {
   const pointer = pointerAtForExport(currentMs, width, height);
   const zoomViewport = getZoomViewportAt(currentMs, pointer, width, height);
   const composed = ensureComposeBuffer(width, height);
@@ -1123,7 +1130,9 @@ function renderExportFrame(renderCtx, sourceVideo, currentMs, width, height) {
   drawZoomedVideoOn(composed.ctx, sourceVideo, null, width, height);
   drawClickBurstsOn(composed.ctx, currentMs, width, height, null);
   drawCursorOn(composed.ctx, pointer);
-  drawHeldButtonsOn(composed.ctx, currentMs);
+  if (showHoldInfo) {
+    drawHeldButtonsOn(composed.ctx, currentMs);
+  }
   drawKeyPillOn(composed.ctx, currentMs, width);
 
   // Pass 2: apply zoom to whole composed frame (video + overlays together).
@@ -1304,7 +1313,9 @@ function renderOverlay() {
   playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
   const frame = ensurePreviewFrameBuffer(canvas.width, canvas.height);
 
-  renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height);
+  renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height, {
+    showHoldInfo: false,
+  });
   clearOverlay();
   ctx.drawImage(frame.canvas, 0, 0, canvas.width, canvas.height);
 

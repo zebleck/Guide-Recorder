@@ -42,6 +42,10 @@ let importedVideoUrl = "";
 let recordStartMs = 0;
 let rafId = 0;
 let isSeeking = false;
+let previewFrameCanvas = null;
+let previewFrameCtx = null;
+let composeCanvas = null;
+let composeCtx = null;
 
 const project = {
   recordedBlob: null,
@@ -52,6 +56,7 @@ const project = {
   texts: [],
   cursorOffsetX: 0,
   cursorOffsetY: 0,
+  captureBounds: null,
 };
 
 const pointerState = {
@@ -153,26 +158,79 @@ function clearOverlay() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-function mapPointForPreviewZoom(point, currentMs, pointer) {
-  const factor = activeZoomAt(currentMs) || 1;
-  if (factor <= 1.001) return point;
-
-  const ox = pointer?.inFrame ? pointer.x : canvas.width / 2;
-  const oy = pointer?.inFrame ? pointer.y : canvas.height / 2;
-  return {
-    x: ox + (point.x - ox) * factor,
-    y: oy + (point.y - oy) * factor,
-  };
+function ensurePreviewFrameBuffer(width, height) {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  if (!previewFrameCanvas) {
+    previewFrameCanvas = document.createElement("canvas");
+    previewFrameCtx = previewFrameCanvas.getContext("2d");
+  }
+  if (previewFrameCanvas.width !== w) previewFrameCanvas.width = w;
+  if (previewFrameCanvas.height !== h) previewFrameCanvas.height = h;
+  return { canvas: previewFrameCanvas, ctx: previewFrameCtx, width: w, height: h };
 }
 
-function drawClickBursts(currentMs, pointer) {
+function ensureComposeBuffer(width, height) {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  if (!composeCanvas) {
+    composeCanvas = document.createElement("canvas");
+    composeCtx = composeCanvas.getContext("2d");
+  }
+  if (composeCanvas.width !== w) composeCanvas.width = w;
+  if (composeCanvas.height !== h) composeCanvas.height = h;
+  return { canvas: composeCanvas, ctx: composeCtx, width: w, height: h };
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function toUnitRatio(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  // Accept both [0..1] and legacy [0..100] percentage formats.
+  if (Math.abs(value) > 1.5) return clamp01(value / 100);
+  return clamp01(value);
+}
+
+function eventRatio(evt, axis) {
+  const ratioKey = axis === "x" ? "xPct" : "yPct";
+  const direct = toUnitRatio(evt?.[ratioKey]);
+  if (direct != null) return direct;
+
+  const bounds = project.captureBounds;
+  if (
+    !bounds ||
+    !Number.isFinite(bounds.x) ||
+    !Number.isFinite(bounds.y) ||
+    !Number.isFinite(bounds.width) ||
+    !Number.isFinite(bounds.height) ||
+    bounds.width <= 0 ||
+    bounds.height <= 0
+  ) {
+    return null;
+  }
+
+  const screenKey = axis === "x" ? "xScreen" : "yScreen";
+  const fallbackKey = axis === "x" ? "x" : "y";
+  const raw = Number.isFinite(evt?.[screenKey]) ? evt[screenKey] : evt?.[fallbackKey];
+  if (!Number.isFinite(raw)) return null;
+
+  const base = axis === "x" ? bounds.x : bounds.y;
+  const size = axis === "x" ? bounds.width : bounds.height;
+  return clamp01((raw - base) / size);
+}
+
+function drawClickBursts(currentMs, zoomViewport, contentRect) {
   const life = 460;
   for (const evt of project.events) {
     if (evt.type !== "mouse_down") continue;
     const age = currentMs - evt.t;
     if (age < 0 || age > life) continue;
     const rawPos = eventToCanvasPosition(evt);
-    const pos = rawPos ? mapPointForPreviewZoom(rawPos, currentMs, pointer) : null;
+    const pos = rawPos
+      ? mapPointThroughViewportInRect(rawPos, zoomViewport, contentRect)
+      : null;
     if (!pos) continue;
     const p = age / life;
     const radius = 12 + p * 34;
@@ -281,13 +339,20 @@ function activeZoomAt(currentMs) {
   return factor;
 }
 
-function applyZoom(currentMs, pointer) {
-  const factor = activeZoomAt(currentMs) || 1;
-  const x = pointer?.inFrame ? pointer.x : canvas.width / 2;
-  const y = pointer?.inFrame ? pointer.y : canvas.height / 2;
+function applyZoom(zoomViewport) {
+  if (!zoomViewport || zoomViewport.factor <= 1.001) {
+    videoEl.style.transformOrigin = "0px 0px";
+    videoEl.style.transform = "matrix(1,0,0,1,0,0)";
+    return;
+  }
 
-  videoEl.style.transformOrigin = `${x}px ${y}px`;
-  videoEl.style.transform = `scale(${factor})`;
+  // Deterministic mapping: x' = f*(x - sx), y' = f*(y - sy).
+  // Using matrix avoids transform-order ambiguity between scale/translate.
+  const f = zoomViewport.factor;
+  const tx = -f * zoomViewport.sx;
+  const ty = -f * zoomViewport.sy;
+  videoEl.style.transformOrigin = "0px 0px";
+  videoEl.style.transform = `matrix(${f},0,0,${f},${tx},${ty})`;
 }
 
 function updateLiveKeyPill(currentMs) {
@@ -305,10 +370,12 @@ function eventToCanvasPosition(evt) {
   const rect = videoContentRect();
   const ox = Number(project.cursorOffsetX || 0);
   const oy = Number(project.cursorOffsetY || 0);
-  if (typeof evt.xPct === "number" && typeof evt.yPct === "number") {
+  const xr = eventRatio(evt, "x");
+  const yr = eventRatio(evt, "y");
+  if (xr != null && yr != null) {
     return {
-      x: rect.x + evt.xPct * rect.width + ox,
-      y: rect.y + evt.yPct * rect.height + oy,
+      x: rect.x + xr * rect.width + ox,
+      y: rect.y + yr * rect.height + oy,
     };
   }
   if (typeof evt.x === "number" && typeof evt.y === "number") {
@@ -362,10 +429,12 @@ function lastKeyDownAt(currentMs) {
 function exportEventToPosition(evt, width, height) {
   const ox = Number(project.cursorOffsetX || 0);
   const oy = Number(project.cursorOffsetY || 0);
-  if (typeof evt.xPct === "number" && typeof evt.yPct === "number") {
+  const xr = eventRatio(evt, "x");
+  const yr = eventRatio(evt, "y");
+  if (xr != null && yr != null) {
     return {
-      x: evt.xPct * width + ox,
-      y: evt.yPct * height + oy,
+      x: xr * width + ox,
+      y: yr * height + oy,
     };
   }
   if (typeof evt.x === "number" && typeof evt.y === "number") {
@@ -542,9 +611,13 @@ function getZoomViewportAt(currentMs, pointer, width, height) {
 
 function mapPointThroughViewport(point, zoomViewport, width, height) {
   if (!zoomViewport || zoomViewport.factor <= 1.001) return point;
-  return {
+  const mapped = {
     x: ((point.x - zoomViewport.sx) * width) / zoomViewport.sw,
     y: ((point.y - zoomViewport.sy) * height) / zoomViewport.sh,
+  };
+  return {
+    x: Math.max(0, Math.min(width, mapped.x)),
+    y: Math.max(0, Math.min(height, mapped.y)),
   };
 }
 
@@ -566,20 +639,60 @@ function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) 
   );
 }
 
+function mapPointThroughViewportInRect(point, zoomViewport, rect) {
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  const local = {
+    x: point.x - rect.x,
+    y: point.y - rect.y,
+  };
+  const mapped = mapPointThroughViewport(local, zoomViewport, rect.width, rect.height);
+  return {
+    x: rect.x + mapped.x,
+    y: rect.y + mapped.y,
+  };
+}
+
+function drawZoomedVideoInRect(renderCtx, sourceVideo, zoomViewport, rect) {
+  if (!rect || rect.width <= 0 || rect.height <= 0) return;
+  const srcW = Math.max(1, Number(sourceVideo?.videoWidth || 0));
+  const srcH = Math.max(1, Number(sourceVideo?.videoHeight || 0));
+  if (srcW <= 1 || srcH <= 1) return;
+
+  if (!zoomViewport || zoomViewport.factor <= 1.001) {
+    renderCtx.drawImage(sourceVideo, rect.x, rect.y, rect.width, rect.height);
+    return;
+  }
+
+  const scaleX = srcW / rect.width;
+  const scaleY = srcH / rect.height;
+  const sx = zoomViewport.sx * scaleX;
+  const sy = zoomViewport.sy * scaleY;
+  const sw = zoomViewport.sw * scaleX;
+  const sh = zoomViewport.sh * scaleY;
+  renderCtx.drawImage(sourceVideo, sx, sy, sw, sh, rect.x, rect.y, rect.width, rect.height);
+}
+
 function renderExportFrame(renderCtx, sourceVideo, currentMs, width, height) {
   const pointer = pointerAtForExport(currentMs, width, height);
   const zoomViewport = getZoomViewportAt(currentMs, pointer, width, height);
+  const composed = ensureComposeBuffer(width, height);
 
+  // Pass 1: compose full frame without zoom.
+  composed.ctx.clearRect(0, 0, width, height);
+  composed.ctx.fillStyle = "#000";
+  composed.ctx.fillRect(0, 0, width, height);
+  drawZoomedVideoOn(composed.ctx, sourceVideo, null, width, height);
+  drawClickBurstsOn(composed.ctx, currentMs, width, height, null);
+  drawCursorOn(composed.ctx, pointer);
+  drawHeldButtonsOn(composed.ctx, currentMs);
+  drawTextOverlaysOn(composed.ctx, currentMs, width, height);
+  drawKeyPillOn(composed.ctx, currentMs, width);
+
+  // Pass 2: apply zoom to whole composed frame (video + overlays together).
   renderCtx.clearRect(0, 0, width, height);
   renderCtx.fillStyle = "#000";
   renderCtx.fillRect(0, 0, width, height);
-
-  drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height);
-  drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport);
-  drawCursorOn(renderCtx, mapPointThroughViewport(pointer, zoomViewport, width, height));
-  drawHeldButtonsOn(renderCtx, currentMs);
-  drawTextOverlaysOn(renderCtx, currentMs, width, height);
-  drawKeyPillOn(renderCtx, currentMs, width);
+  drawZoomedVideoOn(renderCtx, composed.canvas, zoomViewport, width, height);
 }
 
 function preferredExportMimeType() {
@@ -727,29 +840,31 @@ function renderOverlay() {
   if (!videoEl.src) return;
 
   fitCanvasToVideo();
-  clearOverlay();
-
   const currentMs = Math.max(0, videoEl.currentTime * 1000);
-  const pointer = pointerAt(currentMs);
+  const contentRect = videoContentRect();
+  const frame = ensurePreviewFrameBuffer(contentRect.width, contentRect.height);
 
-  applyZoom(currentMs, pointer);
-  drawClickBursts(currentMs, pointer);
-  drawCursor(pointer);
-  drawHeldButtons(currentMs);
-  drawTextOverlays(currentMs);
-  updateLiveKeyPill(currentMs);
+  renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height);
+  clearOverlay();
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(frame.canvas, contentRect.x, contentRect.y, contentRect.width, contentRect.height);
 
   rafId = requestAnimationFrame(renderOverlay);
 }
 
 function startRenderLoop() {
   cancelAnimationFrame(rafId);
+  keyPill.classList.add("hidden");
+  videoEl.style.visibility = "hidden";
   rafId = requestAnimationFrame(renderOverlay);
 }
 
 function stopRenderLoop() {
   cancelAnimationFrame(rafId);
   rafId = 0;
+  keyPill.classList.add("hidden");
+  videoEl.style.visibility = "visible";
 }
 
 function normalizePointerPosition(clientX, clientY) {
@@ -928,6 +1043,7 @@ function saveProjectJson() {
   const serializable = {
     durationSec: project.durationSec,
     recordedMimeType: project.recordedMimeType,
+    captureBounds: project.captureBounds,
     events: project.events,
     zooms: project.zooms,
     texts: project.texts,
@@ -945,6 +1061,14 @@ function applyLoadedProjectData(data) {
   project.zooms = Array.isArray(data.zooms) ? data.zooms : [];
   project.texts = Array.isArray(data.texts) ? data.texts : [];
   project.durationSec = Number(data.durationSec || 0);
+  project.captureBounds = data.captureBounds && typeof data.captureBounds === "object"
+    ? {
+        x: Number(data.captureBounds.x || 0),
+        y: Number(data.captureBounds.y || 0),
+        width: Number(data.captureBounds.width || 0),
+        height: Number(data.captureBounds.height || 0),
+      }
+    : null;
   project.cursorOffsetX = Number(data.cursorOffsetX || 0);
   project.cursorOffsetY = Number(data.cursorOffsetY || 0);
   cursorOffsetXInput.value = String(project.cursorOffsetX);

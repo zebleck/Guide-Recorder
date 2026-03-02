@@ -131,7 +131,7 @@ button:hover:not(:disabled),
 #previewVideo {
   object-fit: contain;
   transform-origin: center center;
-  transition: transform 120ms linear;
+  transition: none;
 }
 
 .key-pill {

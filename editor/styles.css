@@ -247,7 +247,8 @@ body::after {
 
 .controls .row-toolbar > button,
 .controls .row-toolbar > .file-input,
-.controls .row-toolbar > .cursor-btn-wrap {
+.controls .row-toolbar > .cursor-btn-wrap,
+.controls .row-toolbar > .aspect-select {
   flex-shrink: 0;
 }
 
@@ -458,6 +459,12 @@ label.file-input {
   align-items: center;
 }
 
+label.aspect-select {
+  font-size: 0.75rem;
+  gap: 4px;
+  margin-right: 2px;
+}
+
 input {
   font-family: var(--font-mono);
   font-size: 0.82rem;
@@ -470,6 +477,24 @@ input {
 }
 
 input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+select {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 8px 10px;
+  min-width: 92px;
+  background: var(--bg-input);
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  color: var(--text-primary);
+}
+
+select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-muted);

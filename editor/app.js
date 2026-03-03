@@ -23,6 +23,7 @@ const effectEditorDuplicateBtn = document.getElementById("effectEditorDuplicateB
 const cursorSettingsBtn = document.getElementById("cursorSettingsBtn");
 const cursorPopover = document.getElementById("cursorPopover");
 const cursorPopoverCloseBtn = document.getElementById("cursorPopoverCloseBtn");
+const aspectPresetSelect = document.getElementById("aspectPresetSelect");
 
 const videoEl = document.getElementById("previewVideo");
 const canvas = document.getElementById("overlayCanvas");
@@ -53,11 +54,24 @@ let composeCanvas = null;
 let composeCtx = null;
 const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
 const CURSOR_PREFS_STORAGE_KEY = "guide-recorder.cursor-prefs.v1";
+const EDITOR_DRAFT_DB_NAME = "guide-recorder-editor";
+const EDITOR_DRAFT_STORE = "drafts";
+const EDITOR_DRAFT_PROJECT_KEY = "project";
+const EDITOR_DRAFT_VIDEO_KEY = "video";
 let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
 const MIN_EFFECT_DURATION_SEC = 0.2;
 const EFFECT_RESIZE_EDGE_PX = 20;
+const CAMERA_DEADZONE_RATIO = 0.22;
+const ASPECT_PRESET_VALUES = {
+  "16:9": 16 / 9,
+  "1:1": 1,
+  "9:16": 9 / 16,
+  "4:3": 4 / 3,
+  "3:4": 3 / 4,
+  "21:9": 21 / 9,
+};
 
 const timelineHoverSec = {
   zoom: 0,
@@ -68,6 +82,7 @@ let editingEffect = null;
 let resizingEffect = null;
 let effectEditorAnchorPoint = null;
 let suppressNextSegmentClick = false;
+let draftPersistTimer = 0;
 
 const project = {
   recordedBlob: null,
@@ -83,6 +98,7 @@ const project = {
   cursorTextureName: "",
   cursorHotspotX: 0,
   cursorHotspotY: 0,
+  aspectPreset: "source",
 };
 
 function setStatus(msg) {
@@ -127,6 +143,36 @@ function syncPlaybackUi() {
   timeLabel.textContent = `${formatClock(cur)} / ${formatClock(dur)}`;
   playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
   updateTimelinePlayhead(cur, dur);
+}
+
+function normalizeAspectPreset(value) {
+  const key = String(value || "source");
+  if (key === "source") return "source";
+  return Object.prototype.hasOwnProperty.call(ASPECT_PRESET_VALUES, key) ? key : "source";
+}
+
+function activeAspectRatio(videoWidth, videoHeight) {
+  const safeW = Math.max(1, Number(videoWidth || 0));
+  const safeH = Math.max(1, Number(videoHeight || 0));
+  const sourceAspect = safeW / safeH;
+  const preset = normalizeAspectPreset(project.aspectPreset);
+  if (preset === "source") return sourceAspect;
+  return ASPECT_PRESET_VALUES[preset] || sourceAspect;
+}
+
+function syncAspectPresetUi() {
+  if (!aspectPresetSelect) return;
+  aspectPresetSelect.value = normalizeAspectPreset(project.aspectPreset);
+}
+
+function updateSourceAspectOptionLabel(videoWidth, videoHeight) {
+  if (!aspectPresetSelect) return;
+  const sourceOption = aspectPresetSelect.querySelector('option[value="source"]');
+  if (!sourceOption) return;
+  const vw = Number(videoWidth || 0);
+  const vh = Number(videoHeight || 0);
+  if (vw > 0 && vh > 0) sourceOption.textContent = `Source (${vw}x${vh})`;
+  else sourceOption.textContent = "Source";
 }
 
 function effectiveDurationSecFor(sourceDuration) {
@@ -306,6 +352,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       editingEffect.index = effectsFor(kind).indexOf(active);
       renderEffectsTimeline();
       syncPlaybackUi();
+      queueDraftProjectPersist();
     });
   }
 
@@ -328,6 +375,7 @@ function deleteEffect(kind, index) {
     renderEffectsTimeline();
   }
   syncPlaybackUi();
+  queueDraftProjectPersist();
   return true;
 }
 
@@ -398,19 +446,68 @@ function fitCanvasToVideo() {
   canvas.height = Math.max(1, Math.floor(rect.height));
 }
 
+function evenFloor(value) {
+  const n = Math.max(2, Math.floor(Number(value || 0)));
+  return n % 2 === 0 ? n : n - 1;
+}
+
+function outputDimensionsForSource(sourceW, sourceH) {
+  const safeW = Math.max(2, Math.round(Number(sourceW || 0)));
+  const safeH = Math.max(2, Math.round(Number(sourceH || 0)));
+  const targetAspect = activeAspectRatio(safeW, safeH);
+  const sourceAspect = safeW / safeH;
+  let outW = safeW;
+  let outH = safeH;
+
+  if (Math.abs(targetAspect - sourceAspect) > 0.0001) {
+    if (targetAspect > sourceAspect) outH = Math.max(2, Math.round(safeW / targetAspect));
+    else outW = Math.max(2, Math.round(safeH * targetAspect));
+  }
+
+  return {
+    width: evenFloor(outW),
+    height: evenFloor(outH),
+  };
+}
+
+function aspectViewportForSource(sourceW, sourceH) {
+  const safeW = Math.max(1, Number(sourceW || 0));
+  const safeH = Math.max(1, Number(sourceH || 0));
+  const targetAspect = activeAspectRatio(safeW, safeH);
+  const sourceAspect = safeW / safeH;
+  if (Math.abs(targetAspect - sourceAspect) <= 0.0001) {
+    return {
+      sx: 0,
+      sy: 0,
+      sw: safeW,
+      sh: safeH,
+    };
+  }
+
+  let sw = safeW;
+  let sh = safeH;
+  if (targetAspect > sourceAspect) sh = safeW / targetAspect;
+  else sw = safeH * targetAspect;
+  const sx = (safeW - sw) / 2;
+  const sy = (safeH - sh) / 2;
+
+  return { sx, sy, sw, sh };
+}
+
 function syncPreviewStageAspect() {
   const vw = Number(videoEl.videoWidth || 0);
   const vh = Number(videoEl.videoHeight || 0);
   if (!previewStageEl || !previewViewportEl || vw <= 0 || vh <= 0) return;
+  const outputDims = outputDimensionsForSource(vw, vh);
 
   // Fit stage strictly inside viewport rect (contain; never clip, never overlap controls).
   const viewportW = Math.max(1, Number(previewViewportEl.clientWidth || 1));
   const viewportH = Math.max(1, Number(previewViewportEl.clientHeight || 1));
-  const scale = Math.min(viewportW / vw, viewportH / vh);
-  const targetW = Math.max(1, Math.floor(vw * scale));
-  const targetH = Math.max(1, Math.floor(vh * scale));
+  const scale = Math.min(viewportW / outputDims.width, viewportH / outputDims.height);
+  const targetW = Math.max(1, Math.floor(outputDims.width * scale));
+  const targetH = Math.max(1, Math.floor(outputDims.height * scale));
 
-  previewStageEl.style.aspectRatio = `${vw} / ${vh}`;
+  previewStageEl.style.aspectRatio = `${outputDims.width} / ${outputDims.height}`;
   previewStageEl.style.width = `${targetW}px`;
   previewStageEl.style.height = `${targetH}px`;
 }
@@ -577,6 +674,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "", shouldPersist = 
     project.cursorHotspotY = 0;
     syncCursorHotspotInputs();
     renderCursorPreviewCanvas();
+    queueDraftProjectPersist();
     if (shouldPersist) persistCursorPrefsToLocalStorage();
     return;
   }
@@ -593,6 +691,7 @@ async function loadCursorTextureFromDataUrl(dataUrl, name = "", shouldPersist = 
   clampHotspotToImageBounds();
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
+  queueDraftProjectPersist();
   if (shouldPersist) persistCursorPrefsToLocalStorage();
 }
 
@@ -1014,26 +1113,41 @@ function drawKeyPillOn(renderCtx, currentMs, width) {
 }
 
 function getZoomViewportAt(currentMs, pointer, width, height) {
+  const aspectViewport = aspectViewportForSource(width, height);
   const factor = activeZoomAt(currentMs) || 1;
-  if (factor <= 1.001) {
-    return {
-      factor: 1,
-      sx: 0,
-      sy: 0,
-      sw: width,
-      sh: height,
-    };
-  }
+  const sw = aspectViewport.sw / factor;
+  const sh = aspectViewport.sh / factor;
+  let sx = (width - sw) / 2;
+  let sy = (height - sh) / 2;
 
-  const px = pointer?.inFrame ? pointer.x : width / 2;
-  const py = pointer?.inFrame ? pointer.y : height / 2;
-  const sw = width / factor;
-  const sh = height / factor;
-  let sx = px - sw / 2;
-  let sy = py - sh / 2;
+  if (pointer?.inFrame) {
+    const px = Number(pointer.x || 0);
+    const py = Number(pointer.y || 0);
+    const deadX = Math.max(1, sw * CAMERA_DEADZONE_RATIO);
+    const deadY = Math.max(1, sh * CAMERA_DEADZONE_RATIO);
+    const leftEdge = sx + deadX;
+    const rightEdge = sx + sw - deadX;
+    const topEdge = sy + deadY;
+    const bottomEdge = sy + sh - deadY;
+
+    if (px < leftEdge) sx = px - deadX;
+    else if (px > rightEdge) sx = px + deadX - sw;
+    if (py < topEdge) sy = py - deadY;
+    else if (py > bottomEdge) sy = py + deadY - sh;
+  }
 
   sx = Math.max(0, Math.min(width - sw, sx));
   sy = Math.max(0, Math.min(height - sh, sy));
+
+  if (factor <= 1.001) {
+    return {
+      factor: 1,
+      sx,
+      sy,
+      sw,
+      sh,
+    };
+  }
 
   return {
     factor,
@@ -1045,7 +1159,12 @@ function getZoomViewportAt(currentMs, pointer, width, height) {
 }
 
 function mapPointThroughViewport(point, zoomViewport, width, height) {
-  if (!zoomViewport || zoomViewport.factor <= 1.001) return point;
+  if (!zoomViewport) return point;
+  const isIdentity = Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sw || width) - width) <= 0.001
+    && Math.abs(Number(zoomViewport.sh || height) - height) <= 0.001;
+  if (isIdentity) return point;
   const mapped = {
     x: ((point.x - zoomViewport.sx) * width) / zoomViewport.sw,
     y: ((point.y - zoomViewport.sy) * height) / zoomViewport.sh,
@@ -1059,7 +1178,15 @@ function mapPointThroughViewport(point, zoomViewport, width, height) {
 function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) {
   renderCtx.imageSmoothingEnabled = true;
   renderCtx.imageSmoothingQuality = "high";
-  if (!zoomViewport || zoomViewport.factor <= 1.001) {
+  if (!zoomViewport) {
+    renderCtx.drawImage(sourceVideo, 0, 0, width, height);
+    return;
+  }
+  const isIdentity = Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sw || width) - width) <= 0.001
+    && Math.abs(Number(zoomViewport.sh || height) - height) <= 0.001;
+  if (isIdentity) {
     renderCtx.drawImage(sourceVideo, 0, 0, width, height);
     return;
   }
@@ -1097,7 +1224,16 @@ function drawZoomedVideoInRect(renderCtx, sourceVideo, zoomViewport, rect) {
   const srcH = Math.max(1, Number(sourceVideo?.videoHeight || 0));
   if (srcW <= 1 || srcH <= 1) return;
 
-  if (!zoomViewport || zoomViewport.factor <= 1.001) {
+  if (!zoomViewport) {
+    renderCtx.drawImage(sourceVideo, rect.x, rect.y, rect.width, rect.height);
+    return;
+  }
+
+  const isIdentity = Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sw || rect.width) - rect.width) <= 0.001
+    && Math.abs(Number(zoomViewport.sh || rect.height) - rect.height) <= 0.001;
+  if (isIdentity) {
     renderCtx.drawImage(sourceVideo, rect.x, rect.y, rect.width, rect.height);
     return;
   }
@@ -1119,16 +1255,18 @@ function renderExportFrame(
   height,
   { showHoldInfo = true } = {},
 ) {
-  const pointer = pointerAtForExport(currentMs, width, height);
-  const zoomViewport = getZoomViewportAt(currentMs, pointer, width, height);
-  const composed = ensureComposeBuffer(width, height);
+  const sourceW = Math.max(2, Number(sourceVideo?.videoWidth || width || 0));
+  const sourceH = Math.max(2, Number(sourceVideo?.videoHeight || height || 0));
+  const pointer = pointerAtForExport(currentMs, sourceW, sourceH);
+  const zoomViewport = getZoomViewportAt(currentMs, pointer, sourceW, sourceH);
+  const composed = ensureComposeBuffer(sourceW, sourceH);
 
   // Pass 1: compose full frame without zoom.
-  composed.ctx.clearRect(0, 0, width, height);
+  composed.ctx.clearRect(0, 0, sourceW, sourceH);
   composed.ctx.fillStyle = "#000";
-  composed.ctx.fillRect(0, 0, width, height);
-  drawZoomedVideoOn(composed.ctx, sourceVideo, null, width, height);
-  drawClickBurstsOn(composed.ctx, currentMs, width, height, null);
+  composed.ctx.fillRect(0, 0, sourceW, sourceH);
+  drawZoomedVideoOn(composed.ctx, sourceVideo, null, sourceW, sourceH);
+  drawClickBurstsOn(composed.ctx, currentMs, sourceW, sourceH, null);
   drawCursorOn(composed.ctx, pointer);
   if (showHoldInfo) {
     drawHeldButtonsOn(composed.ctx, currentMs);
@@ -1203,8 +1341,9 @@ async function exportFinalVideo() {
       await waitForMediaEvent(exportVideo, "loadedmetadata");
     }
 
-    const width = Math.max(2, exportVideo.videoWidth || 0);
-    const height = Math.max(2, exportVideo.videoHeight || 0);
+    const sourceWidth = Math.max(2, exportVideo.videoWidth || 0);
+    const sourceHeight = Math.max(2, exportVideo.videoHeight || 0);
+    const { width, height } = outputDimensionsForSource(sourceWidth, sourceHeight);
     if (width < 2 || height < 2) {
       throw new Error("Invalid video dimensions for export");
     }
@@ -1311,7 +1450,8 @@ function renderOverlay() {
   }
   timeLabel.textContent = `${formatClock(uiSec)} / ${formatClock(dur)}`;
   playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
-  const frame = ensurePreviewFrameBuffer(canvas.width, canvas.height);
+  const previewDims = outputDimensionsForSource(videoEl.videoWidth || canvas.width, videoEl.videoHeight || canvas.height);
+  const frame = ensurePreviewFrameBuffer(previewDims.width, previewDims.height);
 
   renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height, {
     showHoldInfo: false,
@@ -1346,20 +1486,7 @@ function downloadBlob(blob, fileName) {
 }
 
 function saveProjectJson() {
-  const serializable = {
-    durationSec: project.durationSec,
-    recordedMimeType: project.recordedMimeType,
-    captureBounds: project.captureBounds,
-    events: project.events,
-    zooms: project.zooms,
-    texts: project.texts,
-    cursorOffsetX: Number(project.cursorOffsetX || 0),
-    cursorOffsetY: Number(project.cursorOffsetY || 0),
-    cursorTextureDataUrl: project.cursorTextureDataUrl || "",
-    cursorTextureName: project.cursorTextureName || "",
-    cursorHotspotX: Number(project.cursorHotspotX || 0),
-    cursorHotspotY: Number(project.cursorHotspotY || 0),
-  };
+  const serializable = serializeProjectState();
 
   const blob = new Blob([JSON.stringify(serializable, null, 2)], { type: "application/json" });
   downloadBlob(blob, "guide-recorder-project.json");
@@ -1383,9 +1510,11 @@ async function applyLoadedProjectData(data) {
   project.cursorOffsetY = Number(data.cursorOffsetY || 0);
   project.cursorHotspotX = Number(data.cursorHotspotX || 0);
   project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+  project.aspectPreset = normalizeAspectPreset(data.aspectPreset);
   project.cursorTextureName = String(data.cursorTextureName || "");
   cursorOffsetXInput.value = String(project.cursorOffsetX);
   cursorOffsetYInput.value = String(project.cursorOffsetY);
+  syncAspectPresetUi();
   syncCursorHotspotInputs();
   await loadCursorTextureFromDataUrl(
     String(data.cursorTextureDataUrl || ""),
@@ -1394,24 +1523,176 @@ async function applyLoadedProjectData(data) {
   );
   sortEffects();
   renderEffectsTimeline();
+  syncPreviewStageAspect();
+  fitCanvasToVideo();
+  if (videoEl.src) {
+    if (videoEl.paused) renderOverlay();
+    else startRenderLoop();
+  }
+  queueDraftProjectPersist();
+}
+
+function openDraftDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const req = window.indexedDB.open(EDITOR_DRAFT_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(EDITOR_DRAFT_STORE)) {
+        db.createObjectStore(EDITOR_DRAFT_STORE, { keyPath: "key" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("Failed opening draft database"));
+  });
+}
+
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+async function putDraftValue(key, value) {
+  const db = await openDraftDb();
+  try {
+    const tx = db.transaction(EDITOR_DRAFT_STORE, "readwrite");
+    tx.objectStore(EDITOR_DRAFT_STORE).put({ key, value, savedAt: Date.now() });
+    await txDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+async function getDraftValue(key) {
+  const db = await openDraftDb();
+  try {
+    const tx = db.transaction(EDITOR_DRAFT_STORE, "readonly");
+    const req = tx.objectStore(EDITOR_DRAFT_STORE).get(key);
+    const row = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error("Failed reading draft value"));
+    });
+    await txDone(tx);
+    return row?.value ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+function serializeProjectState() {
+  return {
+    durationSec: project.durationSec,
+    recordedMimeType: project.recordedMimeType,
+    captureBounds: project.captureBounds,
+    events: project.events,
+    zooms: project.zooms,
+    texts: project.texts,
+    cursorOffsetX: Number(project.cursorOffsetX || 0),
+    cursorOffsetY: Number(project.cursorOffsetY || 0),
+    cursorTextureDataUrl: project.cursorTextureDataUrl || "",
+    cursorTextureName: project.cursorTextureName || "",
+    cursorHotspotX: Number(project.cursorHotspotX || 0),
+    cursorHotspotY: Number(project.cursorHotspotY || 0),
+    aspectPreset: normalizeAspectPreset(project.aspectPreset),
+  };
+}
+
+function queueDraftProjectPersist() {
+  window.clearTimeout(draftPersistTimer);
+  draftPersistTimer = window.setTimeout(async () => {
+    try {
+      await putDraftValue(EDITOR_DRAFT_PROJECT_KEY, serializeProjectState());
+    } catch {
+      // Ignore draft persistence failures.
+    }
+  }, 260);
+}
+
+async function persistDraftVideoSource(source) {
+  try {
+    await putDraftValue(EDITOR_DRAFT_VIDEO_KEY, source);
+  } catch {
+    // Ignore draft persistence failures.
+  }
+}
+
+function attachCurrentVideoToPlayer(statusText = "") {
+  videoEl.src = importedVideoUrl || "";
+  videoEl.onloadedmetadata = () => {
+    updateSourceAspectOptionLabel(videoEl.videoWidth, videoEl.videoHeight);
+    syncPreviewStageAspect();
+    fitCanvasToVideo();
+    startRenderLoop();
+    refreshActionButtons();
+    renderEffectsTimeline();
+  };
+  refreshActionButtons();
+  if (statusText) setStatus(statusText);
+}
+
+async function restoreDraftSession() {
+  let projectDraft = null;
+  let videoDraft = null;
+  try {
+    [projectDraft, videoDraft] = await Promise.all([
+      getDraftValue(EDITOR_DRAFT_PROJECT_KEY),
+      getDraftValue(EDITOR_DRAFT_VIDEO_KEY),
+    ]);
+  } catch {
+    return false;
+  }
+
+  if (!projectDraft && !videoDraft) return false;
+
+  if (projectDraft) {
+    try {
+      await applyLoadedProjectData(projectDraft);
+    } catch {
+      // Ignore malformed draft project and still try restoring video.
+    }
+  }
+
+  if (videoDraft && typeof videoDraft === "object") {
+    if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(importedVideoUrl);
+    }
+    if (videoDraft.kind === "blob" && videoDraft.blob instanceof Blob) {
+      importedVideoUrl = URL.createObjectURL(videoDraft.blob);
+      attachCurrentVideoToPlayer("Restored previous editor session.");
+    } else if (videoDraft.kind === "url" && typeof videoDraft.url === "string" && videoDraft.url) {
+      const cacheBust = videoDraft.url.includes("?") ? "&" : "?";
+      importedVideoUrl = `${videoDraft.url}${cacheBust}t=${Date.now()}`;
+      attachCurrentVideoToPlayer("Restored previous editor session.");
+    }
+  }
+
+  if (projectDraft) saveProjectBtn.disabled = false;
+  return Boolean(projectDraft || videoEl.src);
 }
 
 async function loadProjectJson(file) {
   const text = await file.text();
   const data = JSON.parse(text);
   await applyLoadedProjectData(data);
+  saveProjectBtn.disabled = false;
   setStatus("Project JSON loaded. Attach a video to preview effects.");
 }
 
 async function tryDesktopAutoLoad() {
   const params = new URLSearchParams(window.location.search);
-  if (params.get("autoloaddesktop") !== "1") return;
+  if (params.get("autoloaddesktop") !== "1") return false;
 
   try {
     const jsonResp = await fetch("/__desktop/latest.json", { cache: "no-store" });
     if (!jsonResp.ok) {
       setStatus("Desktop autoload failed. Load video/json manually.");
-      return;
+      return false;
     }
 
     const data = await jsonResp.json();
@@ -1422,19 +1703,16 @@ async function tryDesktopAutoLoad() {
       URL.revokeObjectURL(importedVideoUrl);
     }
     importedVideoUrl = `/__desktop/latest.video?t=${Date.now()}`;
-    videoEl.src = importedVideoUrl;
-    videoEl.onloadedmetadata = () => {
-      syncPreviewStageAspect();
-      fitCanvasToVideo();
-      startRenderLoop();
-      refreshActionButtons();
-      renderEffectsTimeline();
-    };
+    attachCurrentVideoToPlayer();
     saveProjectBtn.disabled = false;
+    await persistDraftVideoSource({ kind: "url", url: "/__desktop/latest.video" });
+    queueDraftProjectPersist();
     refreshActionButtons();
     setStatus("Desktop recording auto-loaded. Start editing.");
+    return true;
   } catch {
     setStatus("Desktop autoload failed. Load video/json manually.");
+    return false;
   }
 }
 
@@ -1453,26 +1731,41 @@ loadVideoInput.addEventListener("change", async (e) => {
     URL.revokeObjectURL(importedVideoUrl);
   }
   importedVideoUrl = URL.createObjectURL(file);
-  videoEl.src = importedVideoUrl;
-  videoEl.onloadedmetadata = () => {
-    syncPreviewStageAspect();
-    fitCanvasToVideo();
-    startRenderLoop();
-    refreshActionButtons();
-    renderEffectsTimeline();
-  };
-  refreshActionButtons();
+  attachCurrentVideoToPlayer();
+  await persistDraftVideoSource({
+    kind: "blob",
+    name: file.name || "",
+    mimeType: file.type || "",
+    blob: file,
+  });
+  queueDraftProjectPersist();
   setStatus(`Loaded video file: ${file.name}`);
 });
+
+if (aspectPresetSelect) {
+  aspectPresetSelect.addEventListener("change", () => {
+    project.aspectPreset = normalizeAspectPreset(aspectPresetSelect.value);
+    syncAspectPresetUi();
+    syncPreviewStageAspect();
+    fitCanvasToVideo();
+    if (videoEl.src) {
+      if (videoEl.paused) renderOverlay();
+      else startRenderLoop();
+    }
+    queueDraftProjectPersist();
+  });
+}
 
 exportFinalBtn.addEventListener("click", exportFinalVideo);
 cursorOffsetXInput.addEventListener("input", () => {
   project.cursorOffsetX = Number(cursorOffsetXInput.value || 0);
   persistCursorPrefsToLocalStorage();
+  queueDraftProjectPersist();
 });
 cursorOffsetYInput.addEventListener("input", () => {
   project.cursorOffsetY = Number(cursorOffsetYInput.value || 0);
   persistCursorPrefsToLocalStorage();
+  queueDraftProjectPersist();
 });
 cursorHotspotXInput.addEventListener("input", () => {
   project.cursorHotspotX = Number(cursorHotspotXInput.value || 0);
@@ -1480,6 +1773,7 @@ cursorHotspotXInput.addEventListener("input", () => {
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
   persistCursorPrefsToLocalStorage();
+  queueDraftProjectPersist();
 });
 cursorHotspotYInput.addEventListener("input", () => {
   project.cursorHotspotY = Number(cursorHotspotYInput.value || 0);
@@ -1487,6 +1781,7 @@ cursorHotspotYInput.addEventListener("input", () => {
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
   persistCursorPrefsToLocalStorage();
+  queueDraftProjectPersist();
 });
 cursorTextureInput.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
@@ -1520,6 +1815,7 @@ cursorPreviewCanvas.addEventListener("click", (e) => {
   syncCursorHotspotInputs();
   renderCursorPreviewCanvas();
   persistCursorPrefsToLocalStorage();
+  queueDraftProjectPersist();
 });
 
 videoEl.addEventListener("play", startRenderLoop);
@@ -1538,6 +1834,7 @@ videoEl.addEventListener("timeupdate", () => {
 });
 videoEl.addEventListener("loadedmetadata", () => {
   uiPrimedForPlayback = false;
+  updateSourceAspectOptionLabel(videoEl.videoWidth, videoEl.videoHeight);
   syncPreviewStageAspect();
   fitCanvasToVideo();
   syncPlaybackUi();
@@ -1648,6 +1945,7 @@ function addEffectAt(kind, atSec) {
     project.zooms.push(z);
     sortEffects();
     renderEffectsTimeline();
+    queueDraftProjectPersist();
     return;
   }
   const t = {
@@ -1664,6 +1962,7 @@ function addEffectAt(kind, atSec) {
   project.texts.push(t);
   sortEffects();
   renderEffectsTimeline();
+  queueDraftProjectPersist();
 }
 
 zoomTrack.addEventListener("pointermove", (e) => onLanePointerMove("zoom", e));
@@ -1797,6 +2096,7 @@ window.addEventListener("pointermove", (e) => {
 window.addEventListener("pointerup", () => {
   if (resizingEffect) {
     suppressNextSegmentClick = resizingEffect.moved;
+    queueDraftProjectPersist();
   }
   resizingEffect = null;
   document.body.style.cursor = "";
@@ -1842,6 +2142,7 @@ effectEditorDuplicateBtn.addEventListener("click", () => {
   const newIndex = list.indexOf(clone);
   hideEffectEditor();
   openEffectEditor(kind, newIndex);
+  queueDraftProjectPersist();
 });
 
 if (cursorSettingsBtn) {
@@ -1888,13 +2189,24 @@ window.addEventListener("keydown", (e) => {
 
 setStatus("Idle. Load recording JSON/video to begin editing.");
 refreshActionButtons();
+syncAspectPresetUi();
+updateSourceAspectOptionLabel(0, 0);
 syncPlaybackUi();
 renderCursorPreviewCanvas();
 renderEffectsTimeline();
 requestAnimationFrame(syncPreviewStageAspect);
 
 (async () => {
-  await tryDesktopAutoLoad();
+  const params = new URLSearchParams(window.location.search);
+  const wantsDesktopAutoload = params.get("autoloaddesktop") === "1";
+  if (wantsDesktopAutoload) {
+    const loadedDesktop = await tryDesktopAutoLoad();
+    if (!loadedDesktop) {
+      await restoreDraftSession();
+    }
+  } else {
+    await restoreDraftSession();
+  }
   await loadCursorPrefsFromLocalStorage();
 })();
 

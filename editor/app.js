@@ -59,6 +59,7 @@ const EDITOR_DRAFT_DB_NAME = "guide-recorder-editor";
 const EDITOR_DRAFT_STORE = "drafts";
 const EDITOR_DRAFT_PROJECT_KEY = "project";
 const EDITOR_DRAFT_VIDEO_KEY = "video";
+const EFFECT_CLIPBOARD_STORAGE_KEY = "guide-recorder.effect-clipboard.v1";
 let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
@@ -86,7 +87,12 @@ const TEXT_FONT_OPTIONS = [
   { label: "Times New Roman", value: "Times New Roman" },
   { label: "Courier New", value: "Courier New" },
 ];
-const DEBUG_TEXT_FONT = true;
+const TEXT_TRANSITION_OPTIONS = [
+  { label: "None", value: "none" },
+  { label: "Grow", value: "grow" },
+  { label: "Fade", value: "fade" },
+];
+const DEBUG_TEXT_FONT = false;
 const textFontDebugSeen = new Set();
 
 const timelineHoverSec = {
@@ -99,6 +105,9 @@ let resizingEffect = null;
 let effectEditorAnchorPoint = null;
 let suppressNextSegmentClick = false;
 let draftPersistTimer = 0;
+let lastPointerClientX = 0;
+let lastPointerClientY = 0;
+let lastHoveredSegmentRef = null;
 
 const project = {
   recordedBlob: null,
@@ -283,6 +292,20 @@ function textFontOptionsHtml(selectedValue) {
     options = [`<option value="${escaped}" style="font-family:${textFontCssStack(active)}" selected>${escaped}</option>`, ...options];
   }
   return options.join("");
+}
+
+function normalizedTextTransition(value) {
+  const raw = String(value || "none");
+  if (raw === "grow-in" || raw === "grow-out") return "grow";
+  return TEXT_TRANSITION_OPTIONS.some((opt) => opt.value === raw) ? raw : "none";
+}
+
+function textTransitionOptionsHtml(selectedValue) {
+  const active = normalizedTextTransition(selectedValue);
+  return TEXT_TRANSITION_OPTIONS.map((opt) => {
+    const isSelected = opt.value === active ? " selected" : "";
+    return `<option value="${opt.value}"${isSelected}>${opt.label}</option>`;
+  }).join("");
 }
 
 function sourceDurationSecFor(sourceDuration) {
@@ -470,13 +493,19 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
         <label>X (%)<input data-key="xPct" type="number" min="0" max="100" step="1" value="${Math.round(Number(effect.xPct || 0))}" /></label>
         <label>Y (%)<input data-key="yPct" type="number" min="0" max="100" step="1" value="${Math.round(Number(effect.yPct || 0))}" /></label>
       </div>
-      <label>Text<input data-key="value" type="text" value="${String(effect.value || "").replace(/"/g, "&quot;")}" /></label>
+      <label>Text<textarea data-key="value" rows="3">${String(effect.value || "").replace(/</g, "&lt;")}</textarea></label>
       <div class="row">
         <button type="button" class="ghost-btn" data-action="centerText">Center Text</button>
       </div>
       <div class="grid2">
         <label>Font Size (px)<input data-key="fontSize" type="number" min="8" max="200" step="1" value="${Math.round(Number(effect.fontSize || 22))}" /></label>
         <label>Font<select data-key="fontFamily">${textFontOptionsHtml(effect.fontFamily)}</select></label>
+        <label>Transition<select data-key="transition">${textTransitionOptionsHtml(effect.transition)}</select></label>
+        <label>Smooth (ms)<input data-key="smoothMs" type="number" min="0" max="5000" step="10" value="${Math.round(Number(effect.smoothMs ?? 0))}" /></label>
+      </div>
+      <div class="grid2">
+        <label>Bold<input data-key="fontWeight" type="checkbox" ${String(effect.fontWeight || "normal") === "bold" ? "checked" : ""} /></label>
+        <label>Italic<input data-key="fontStyle" type="checkbox" ${String(effect.fontStyle || "normal") === "italic" ? "checked" : ""} /></label>
         <label>Color<input data-key="color" type="color" value="${effect.color || "#ffffff"}" /></label>
         <label>Background<input data-key="bgColor" type="color" value="${effect.bgColor || "#000000"}" /></label>
         <label>BG Alpha (%)<input data-key="bgOpacity" type="range" min="0" max="100" step="1" value="${Math.round(Number(effect.bgOpacity ?? 68))}" /></label>
@@ -485,13 +514,17 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
     `;
   }
 
-  for (const input of effectEditorFields.querySelectorAll("input, select")) {
+  for (const input of effectEditorFields.querySelectorAll("input, select, textarea")) {
     const onFieldChange = () => {
       const active = editingEffect?.effect;
       if (!active) return;
       const key = input.dataset.key;
       if (!key) return;
-      if (key === "value" || key === "color" || key === "bgColor" || key === "fontFamily") {
+      if (key === "fontWeight") {
+        active.fontWeight = input.checked ? "bold" : "normal";
+      } else if (key === "fontStyle") {
+        active.fontStyle = input.checked ? "italic" : "normal";
+      } else if (key === "value" || key === "color" || key === "bgColor" || key === "fontFamily" || key === "transition") {
         active[key] = String(input.value || "");
       } else {
         active[key] = Number(input.value || 0);
@@ -504,6 +537,10 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
         active.yPct = Math.max(0, Math.min(100, Number(active.yPct || 0)));
         active.bgOpacity = Math.max(0, Math.min(100, Number(active.bgOpacity ?? 68)));
         active.fontFamily = selectedTextFontFamily(active.fontFamily);
+        active.fontWeight = String(active.fontWeight || "normal") === "bold" ? "bold" : "normal";
+        active.fontStyle = String(active.fontStyle || "normal") === "italic" ? "italic" : "normal";
+        active.transition = normalizedTextTransition(active.transition);
+        active.smoothMs = Math.max(0, Math.min(5000, Number(active.smoothMs || 0)));
         if (key === "fontFamily" && DEBUG_TEXT_FONT) {
           if (document.fonts?.load) {
             document.fonts.load(`16px '${active.fontFamily.replace(/'/g, "\\'")}'`).catch(() => {});
@@ -590,6 +627,90 @@ function deleteSelectedEffect() {
   const idx = list.indexOf(editingEffect.effect);
   if (idx < 0) return false;
   return deleteEffect(editingEffect.kind, idx);
+}
+
+function activeSegmentForCopy() {
+  if (editingEffect?.effect && (editingEffect.kind === "zoom" || editingEffect.kind === "text")) {
+    const idx = effectsFor(editingEffect.kind).indexOf(editingEffect.effect);
+    if (idx >= 0) return { kind: editingEffect.kind, index: idx, effect: editingEffect.effect };
+  }
+  if (lastHoveredSegmentRef && (lastHoveredSegmentRef.kind === "zoom" || lastHoveredSegmentRef.kind === "text")) {
+    const list = effectsFor(lastHoveredSegmentRef.kind);
+    const effect = list[lastHoveredSegmentRef.index];
+    if (effect) return { kind: lastHoveredSegmentRef.kind, index: lastHoveredSegmentRef.index, effect };
+  }
+  return null;
+}
+
+function copySelectedEffectToClipboard() {
+  const selected = activeSegmentForCopy();
+  if (!selected) {
+    setStatus("Select or hover a zoom/text segment to copy.");
+    return false;
+  }
+  const payload = {
+    kind: selected.kind,
+    effect: JSON.parse(JSON.stringify(selected.effect)),
+    copiedAt: Date.now(),
+  };
+  try {
+    window.localStorage.setItem(EFFECT_CLIPBOARD_STORAGE_KEY, JSON.stringify(payload));
+    setStatus(`Copied ${selected.kind} effect.`);
+    return true;
+  } catch {
+    setStatus("Failed to copy effect.");
+    return false;
+  }
+}
+
+function readEffectClipboard() {
+  try {
+    const raw = window.localStorage.getItem(EFFECT_CLIPBOARD_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || (parsed.kind !== "zoom" && parsed.kind !== "text") || !parsed.effect) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function mediaTimeFromClientX(trackEl, clientX) {
+  const rect = trackEl.getBoundingClientRect();
+  const p = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+  return p * timelineDurationSec();
+}
+
+function pasteEffectFromClipboardAtPointer() {
+  const clipboard = readEffectClipboard();
+  if (!clipboard) {
+    setStatus("Clipboard is empty. Copy a zoom/text effect first.");
+    return false;
+  }
+  const { kind } = clipboard;
+  const list = effectsFor(kind);
+  const source = JSON.parse(JSON.stringify(clipboard.effect));
+  const trackEl = kind === "zoom" ? zoomTrack : textTrack;
+  if (!trackEl || !list) return false;
+
+  const start = Number(source.startSec || 0);
+  const end = Math.max(start, Number(source.endSec || 0));
+  const duration = Math.max(MIN_EFFECT_DURATION_SEC, end - start);
+  const maxDur = timelineDurationSec();
+  const atSec = mediaTimeFromClientX(trackEl, lastPointerClientX);
+  const nextStart = Math.max(0, Math.min(Math.max(0, maxDur - duration), atSec));
+  const clone = {
+    ...source,
+    startSec: nextStart,
+    endSec: nextStart + duration,
+  };
+  list.push(clone);
+  sortEffects();
+  renderEffectsTimeline();
+  syncPlaybackUi();
+  queueDraftProjectPersist();
+  setStatus(`Pasted ${kind} effect.`);
+  return true;
 }
 
 function buildTrackSegments(kind, trackEl, durSec) {
@@ -1047,6 +1168,50 @@ function textBgRgba(t) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
+function textTransitionState(t, tSec) {
+  const transition = normalizedTextTransition(t.transition);
+  const smoothMs = Math.max(0, Number(t.smoothMs || 0));
+  const smoothSec = smoothMs / 1000;
+  let alpha = 1;
+  let scale = 1;
+  if (transition === "none" || smoothSec <= 0) return { alpha, scale };
+
+  const inProgress = Math.max(0, Math.min(1, (tSec - Number(t.startSec || 0)) / smoothSec));
+  const outProgress = Math.max(0, Math.min(1, (Number(t.endSec || 0) - tSec) / smoothSec));
+
+  if (transition === "grow") {
+    if (tSec < Number(t.startSec || 0) + smoothSec) scale = inProgress;
+    if (tSec > Number(t.endSec || 0) - smoothSec) scale = Math.min(scale, outProgress);
+  } else if (transition === "fade") {
+    if (tSec < Number(t.startSec || 0) + smoothSec) alpha = inProgress;
+    if (tSec > Number(t.endSec || 0) - smoothSec) alpha = Math.min(alpha, outProgress);
+  }
+  return { alpha, scale };
+}
+
+function textBoxMetrics(renderCtx, textValue, fontSize, pad) {
+  const lines = String(textValue ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const safeLines = lines.length ? lines : [""];
+  const sampleMetrics = renderCtx.measureText("Mg");
+  const ascent = Number(sampleMetrics.actualBoundingBoxAscent || fontSize * 0.78);
+  const descentRaw = Number(sampleMetrics.actualBoundingBoxDescent || fontSize * 0.24);
+  const descent = Math.min(descentRaw, fontSize * 0.34);
+  let width = 0;
+  for (const line of safeLines) {
+    width = Math.max(width, Number(renderCtx.measureText(line).width || 0));
+  }
+  const lineHeight = Math.max(fontSize * 1.16, ascent + descent + 1);
+  const textBlockH = ascent + descent + Math.max(0, safeLines.length - 1) * lineHeight;
+  const padX = pad;
+  const padTop = pad;
+  const padBottom = Math.max(4, Math.round(pad * 0.55));
+  const boxW = width + padX * 2;
+  const boxH = textBlockH + padTop + padBottom;
+  const baselineY = 0;
+  const boxY = baselineY - ascent - padTop;
+  return { boxW, boxH, boxY, ascent, descent, padX, padTop, padBottom, lines: safeLines, lineHeight };
+}
+
 function drawTextOverlays(currentMs) {
   const tSec = currentMs / 1000;
   for (const t of project.texts) {
@@ -1057,21 +1222,36 @@ function drawTextOverlays(currentMs) {
     const fontSize = Number(t.fontSize || 22);
     const align = t.align === "center" ? "center" : "left";
     const fontFamily = selectedTextFontFamily(t.fontFamily);
+    const fontWeight = String(t.fontWeight || "normal") === "bold" ? "bold" : "normal";
+    const fontStyle = String(t.fontStyle || "normal") === "italic" ? "italic" : "normal";
+    const transitionState = textTransitionState(t, tSec);
 
-    const pad = 8;
-    const requestedFontSpec = resolveCanvasFontSpec(fontSize, fontFamily);
+    const pad = 10;
+    const requestedFontSpec = `${fontStyle} ${fontWeight} ${resolveCanvasFontSpec(fontSize, fontFamily)}`.trim();
+    ctx.save();
+    ctx.globalAlpha = transitionState.alpha;
+    ctx.translate(x, y);
     ctx.font = requestedFontSpec;
     debugLogTextFontUsage("preview", t, requestedFontSpec, ctx.font);
     ctx.textAlign = align;
-    const w = ctx.measureText(t.value).width + pad * 2;
-    const h = fontSize + pad * 2;
+    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetrics(ctx, t.value, fontSize, pad);
+    const bgX = align === "center" ? -w / 2 : -pad;
+    const pivotX = bgX + w / 2;
+    const pivotY = boxY + h / 2;
+    ctx.translate(pivotX, pivotY);
+    ctx.scale(transitionState.scale, transitionState.scale);
+    ctx.translate(-pivotX, -pivotY);
 
     ctx.fillStyle = textBgRgba(t);
-    const bgX = align === "center" ? x - w / 2 : x - pad;
-    ctx.fillRect(bgX, y - fontSize - pad + 4, w, h);
+    const bgRadius = Math.max(0, Math.min(14, h * 0.35));
+    ctx.beginPath();
+    ctx.roundRect(bgX, boxY, w, h, bgRadius);
+    ctx.fill();
     ctx.fillStyle = t.color || "#ffffff";
-    ctx.fillText(t.value, x, y);
-    ctx.textAlign = "left";
+    for (let i = 0; i < lines.length; i += 1) {
+      ctx.fillText(lines[i], 0, i * lineHeight);
+    }
+    ctx.restore();
   }
 }
 
@@ -1304,20 +1484,35 @@ function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
     const fontSize = Number(t.fontSize || 22);
     const align = t.align === "center" ? "center" : "left";
     const fontFamily = selectedTextFontFamily(t.fontFamily);
-    const pad = 8;
-
-    const requestedFontSpec = resolveCanvasFontSpec(fontSize, fontFamily);
+    const fontWeight = String(t.fontWeight || "normal") === "bold" ? "bold" : "normal";
+    const fontStyle = String(t.fontStyle || "normal") === "italic" ? "italic" : "normal";
+    const transitionState = textTransitionState(t, tSec);
+    const pad = 10;
+    const requestedFontSpec = `${fontStyle} ${fontWeight} ${resolveCanvasFontSpec(fontSize, fontFamily)}`.trim();
+    renderCtx.save();
+    renderCtx.globalAlpha = transitionState.alpha;
+    renderCtx.translate(x, y);
     renderCtx.font = requestedFontSpec;
     debugLogTextFontUsage("export", t, requestedFontSpec, renderCtx.font);
     renderCtx.textAlign = align;
-    const w = renderCtx.measureText(t.value).width + pad * 2;
-    const h = fontSize + pad * 2;
+    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetrics(renderCtx, t.value, fontSize, pad);
+    const bgX = align === "center" ? -w / 2 : -pad;
+    const pivotX = bgX + w / 2;
+    const pivotY = boxY + h / 2;
+    renderCtx.translate(pivotX, pivotY);
+    renderCtx.scale(transitionState.scale, transitionState.scale);
+    renderCtx.translate(-pivotX, -pivotY);
+
     renderCtx.fillStyle = textBgRgba(t);
-    const bgX = align === "center" ? x - w / 2 : x - pad;
-    renderCtx.fillRect(bgX, y - fontSize - pad + 4, w, h);
+    const bgRadius = Math.max(0, Math.min(14, h * 0.35));
+    renderCtx.beginPath();
+    renderCtx.roundRect(bgX, boxY, w, h, bgRadius);
+    renderCtx.fill();
     renderCtx.fillStyle = t.color || "#ffffff";
-    renderCtx.fillText(t.value, x, y);
-    renderCtx.textAlign = "left";
+    for (let i = 0; i < lines.length; i += 1) {
+      renderCtx.fillText(lines[i], 0, i * lineHeight);
+    }
+    renderCtx.restore();
   }
 }
 
@@ -1739,6 +1934,14 @@ async function applyLoadedProjectData(data) {
   project.events.sort((a, b) => Number(a.t || 0) - Number(b.t || 0));
   project.zooms = Array.isArray(data.zooms) ? data.zooms : [];
   project.texts = Array.isArray(data.texts) ? data.texts : [];
+  project.texts = project.texts.map((t) => ({
+    ...t,
+    fontFamily: selectedTextFontFamily(t?.fontFamily),
+    fontWeight: String(t?.fontWeight || "normal") === "bold" ? "bold" : "normal",
+    fontStyle: String(t?.fontStyle || "normal") === "italic" ? "italic" : "normal",
+    transition: normalizedTextTransition(t?.transition),
+    smoothMs: Math.max(0, Math.min(5000, Number(t?.smoothMs || 0))),
+  }));
   project.durationSec = Number(data.durationSec || 0);
   project.captureBounds = data.captureBounds && typeof data.captureBounds === "object"
     ? {
@@ -2222,6 +2425,10 @@ function addEffectAt(kind, atSec) {
     value: "Text",
     fontSize: 22,
     fontFamily: "Segoe UI",
+    fontWeight: "normal",
+    fontStyle: "normal",
+    transition: "none",
+    smoothMs: 0,
     color: "#ffffff",
     bgColor: "#000000",
     bgOpacity: 68,
@@ -2253,6 +2460,8 @@ textAddBtn.addEventListener("click", (e) => {
 });
 
 timelineSurface.addEventListener("click", (e) => {
+  lastPointerClientX = e.clientX;
+  lastPointerClientY = e.clientY;
   const removeBtn = e.target.closest(".timeline-remove-btn");
   if (removeBtn) {
     e.preventDefault();
@@ -2305,6 +2514,8 @@ timelineSurface.addEventListener("click", (e) => {
 });
 
 timelineSurface.addEventListener("pointerdown", (e) => {
+  lastPointerClientX = e.clientX;
+  lastPointerClientY = e.clientY;
   if (e.target.closest(".timeline-remove-btn")) return;
   const segEl = e.target.closest(".timeline-segment");
   if (!segEl) return;
@@ -2356,6 +2567,8 @@ timelineSurface.addEventListener("pointerdown", (e) => {
 });
 
 window.addEventListener("pointermove", (e) => {
+  lastPointerClientX = e.clientX;
+  lastPointerClientY = e.clientY;
   if (!resizingEffect) return;
   const { kind, effect, side, trackEl, startClientX, origStart, origEnd, durSec } = resizingEffect;
   if (kind === "trim") {
@@ -2421,11 +2634,19 @@ window.addEventListener("pointerup", () => {
 });
 
 timelineSurface.addEventListener("pointermove", (e) => {
+  lastPointerClientX = e.clientX;
+  lastPointerClientY = e.clientY;
   if (resizingEffect) {
     timelineSurface.style.cursor = resizingEffect.side === "move" ? "grabbing" : "ew-resize";
     return;
   }
   const segEl = e.target.closest(".timeline-segment");
+  if (segEl && (segEl.dataset.kind === "zoom" || segEl.dataset.kind === "text")) {
+    lastHoveredSegmentRef = {
+      kind: segEl.dataset.kind,
+      index: Number(segEl.dataset.index || -1),
+    };
+  }
   if (!segEl) {
     timelineSurface.style.cursor = "pointer";
     return;
@@ -2436,6 +2657,7 @@ timelineSurface.addEventListener("pointermove", (e) => {
 
 timelineSurface.addEventListener("pointerleave", () => {
   if (!resizingEffect) timelineSurface.style.cursor = "pointer";
+  lastHoveredSegmentRef = null;
 });
 
 effectEditorCloseBtn.addEventListener("click", () => {
@@ -2496,9 +2718,19 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "Delete") return;
   const target = e.target;
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+  const isEditable = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
+  const cmdOrCtrl = e.ctrlKey || e.metaKey;
+  if (cmdOrCtrl && !e.shiftKey && !e.altKey && !isEditable && (e.key === "c" || e.key === "C")) {
+    if (copySelectedEffectToClipboard()) e.preventDefault();
+    return;
+  }
+  if (cmdOrCtrl && !e.shiftKey && !e.altKey && !isEditable && (e.key === "v" || e.key === "V")) {
+    if (pasteEffectFromClipboardAtPointer()) e.preventDefault();
+    return;
+  }
+  if (e.key !== "Delete") return;
+  if (isEditable) return;
   if (deleteSelectedEffect()) {
     e.preventDefault();
   }

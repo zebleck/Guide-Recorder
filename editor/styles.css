@@ -476,7 +476,26 @@ input {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+textarea {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  padding: 10px 12px;
+  min-height: 72px;
+  resize: vertical;
+  background: var(--bg-input);
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  color: var(--text-primary);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
 input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-muted);
@@ -1117,6 +1136,14 @@ input[type="color"] {
   height: 36px;
   border-radius: 8px;
   cursor: pointer;
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
 }
 
 input[type="color"]::-webkit-color-swatch-wrapper {

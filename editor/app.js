@@ -60,6 +60,7 @@ const EDITOR_DRAFT_STORE = "drafts";
 const EDITOR_DRAFT_PROJECT_KEY = "project";
 const EDITOR_DRAFT_VIDEO_KEY = "video";
 const EFFECT_CLIPBOARD_STORAGE_KEY = "guide-recorder.effect-clipboard.v1";
+const DETERMINISTIC_EXPORT_MAX_FRAMES = 12000;
 let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
@@ -1799,6 +1800,26 @@ async function exportFinalVideo() {
     exportCanvas.width = width;
     exportCanvas.height = height;
     const exportCtx = exportCanvas.getContext("2d");
+    const deterministic = await tryDesktopDeterministicFrameExport({
+      exportVideo,
+      exportCanvas,
+      exportCtx,
+      width,
+      height,
+      trimStartSec,
+      trimEndSec,
+      targetDurationSec,
+    });
+    if (deterministic?.blob) {
+      downloadBlob(deterministic.blob, "guide-recorder-final.mp4");
+      setStatus("Final video exported with effects (deterministic MP4).");
+      return;
+    }
+    if (deterministic?.reason) {
+      const msg = `Deterministic export skipped (${deterministic.reason}), using realtime path.`;
+      setStatus(msg);
+      console.warn("[export-debug]", msg);
+    }
 
     const fps = 60;
     const canvasStream = exportCanvas.captureStream(fps);
@@ -2024,6 +2045,108 @@ async function tryDesktopTranscodeMp4(sourceBlob, fps = 60) {
     return new Blob([blob], { type: "video/mp4" });
   } catch {
     return null;
+  }
+}
+
+function canvasToBlob(canvasEl, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvasEl.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Canvas encoding failed"));
+    }, type, quality);
+  });
+}
+
+async function seekVideoForFrame(video, sec) {
+  const target = Math.max(0, Number(sec || 0));
+  if (Math.abs(Number(video.currentTime || 0) - target) < 0.0005) return;
+  video.currentTime = target;
+  await waitForMediaEvent(video, "seeked");
+}
+
+async function tryDesktopDeterministicFrameExport({
+  exportVideo,
+  exportCanvas,
+  exportCtx,
+  width,
+  height,
+  trimStartSec,
+  trimEndSec,
+  targetDurationSec,
+}) {
+  if (!(targetDurationSec > 0)) return { blob: null, reason: "target duration is 0s" };
+  const fps = 60;
+  const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
+  if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
+    return {
+      blob: null,
+      reason: `too long (${totalFrames} frames > ${DETERMINISTIC_EXPORT_MAX_FRAMES})`,
+    };
+  }
+
+  let jobId = "";
+  try {
+    setStatus("Starting deterministic export...");
+    const startResp = await fetch("/__desktop/export/frames/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        fps,
+        width,
+        height,
+        trimStartSec,
+        trimEndSec,
+        includeDesktopAudio: isDesktopAutoloadVideoSource(),
+      }),
+    });
+    if (!startResp.ok) return { blob: null, reason: `start endpoint failed (${startResp.status})` };
+    const startJson = await startResp.json();
+    jobId = String(startJson?.jobId || "");
+    if (!jobId) return { blob: null, reason: "desktop did not return jobId" };
+
+    for (let i = 0; i < totalFrames; i += 1) {
+      const t = Math.min(trimEndSec, trimStartSec + (i / fps));
+      await seekVideoForFrame(exportVideo, t);
+      renderExportFrame(exportCtx, exportVideo, t * 1000, width, height);
+      const jpg = await canvasToBlob(exportCanvas, "image/jpeg", 0.92);
+      const frameResp = await fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${i}`, {
+        method: "POST",
+        headers: { "Content-Type": "image/jpeg" },
+        body: jpg,
+      });
+      if (!frameResp.ok) return { blob: null, reason: `frame upload failed at ${i} (${frameResp.status})` };
+      if (i % 30 === 0 || i === totalFrames - 1) {
+        setStatus(`Deterministic export: frame ${i + 1}/${totalFrames}`);
+      }
+    }
+
+    const finalizeResp = await fetch("/__desktop/export/frames/finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        jobId,
+        fps,
+        trimStartSec,
+        trimEndSec,
+      }),
+    });
+    if (!finalizeResp.ok) return { blob: null, reason: `finalize failed (${finalizeResp.status})` };
+    const outBlob = await finalizeResp.blob();
+    if (!outBlob || outBlob.size <= 0) return { blob: null, reason: "finalize returned empty file" };
+    const outMp4 = new Blob([outBlob], { type: "video/mp4" });
+    const ok = await validateVideoBlobDuration(outMp4, targetDurationSec * 0.9);
+    if (!ok) return { blob: null, reason: "final MP4 failed duration validation" };
+    return { blob: outMp4, reason: "" };
+  } catch (err) {
+    return { blob: null, reason: err?.message || "exception in deterministic export" };
+  } finally {
+    if (jobId) {
+      fetch("/__desktop/export/frames/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ jobId }),
+      }).catch(() => {});
+    }
   }
 }
 

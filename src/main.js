@@ -25,6 +25,7 @@ let latestSaved = {
   videoPath: "",
   jsonPath: "",
 };
+const frameExportJobs = new Map();
 
 const editorRoot = path.resolve(__dirname, "..", "editor");
 const appLogoPath = path.resolve(__dirname, "..", "logo.svg");
@@ -610,6 +611,161 @@ async function ensureEditorServer() {
           await safeRemoveDir(tmpDir);
           res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: false, error: err?.message || "Transcode failed" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/frames/start" && req.method === "POST") {
+        try {
+          await verifyFfmpegAvailable();
+          const body = await readJsonBody(req);
+          const fps = Math.max(12, Math.min(120, Math.round(Number(body?.fps || 60))));
+          const trimStartSec = Math.max(0, Number(body?.trimStartSec || 0));
+          const trimEndRaw = Number(body?.trimEndSec || 0);
+          const trimEndSec = trimEndRaw > trimStartSec ? trimEndRaw : 0;
+          const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-frame-export-"));
+          const framesDir = path.join(tmpDir, "frames");
+          await fs.mkdir(framesDir, { recursive: true });
+          const includeDesktopAudio = Boolean(body?.includeDesktopAudio && latestSaved.videoPath);
+          const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+          frameExportJobs.set(jobId, {
+            jobId,
+            tmpDir,
+            framesDir,
+            fps,
+            trimStartSec,
+            trimEndSec,
+            sourceVideoPath: includeDesktopAudio ? latestSaved.videoPath : "",
+          });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ ok: true, jobId }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not start frame export job" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/frames/frame" && req.method === "POST") {
+        try {
+          const jobId = String(requestUrl.searchParams.get("jobId") || "");
+          const index = Math.max(0, Math.floor(Number(requestUrl.searchParams.get("index") || 0)));
+          const job = frameExportJobs.get(jobId);
+          if (!job) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Frame export job not found" }));
+            return;
+          }
+          const frameName = `frame_${String(index).padStart(6, "0")}.jpg`;
+          const outPath = path.join(job.framesDir, frameName);
+          await writeRequestBodyToFile(req, outPath);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not write frame" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/frames/finalize" && req.method === "POST") {
+        let job = null;
+        try {
+          const body = await readJsonBody(req);
+          const jobId = String(body?.jobId || "");
+          job = frameExportJobs.get(jobId);
+          if (!job) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Frame export job not found" }));
+            return;
+          }
+          const fps = Math.max(12, Math.min(120, Math.round(Number(body?.fps || job.fps || 60))));
+          const trimStartSec = Math.max(0, Number(body?.trimStartSec ?? job.trimStartSec ?? 0));
+          const outputPath = path.join(job.tmpDir, "final.mp4");
+          const framePattern = path.join(job.framesDir, "frame_%06d.jpg");
+          const args = [
+            "-y",
+            "-framerate",
+            String(fps),
+            "-start_number",
+            "0",
+            "-i",
+            framePattern,
+          ];
+          if (job.sourceVideoPath) {
+            if (trimStartSec > 0) args.push("-ss", trimStartSec.toFixed(3));
+            args.push("-i", job.sourceVideoPath);
+            args.push("-map", "0:v:0", "-map", "1:a?");
+          } else {
+            args.push("-map", "0:v:0");
+          }
+          args.push(
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+          );
+          if (job.sourceVideoPath) {
+            args.push("-c:a", "aac", "-b:a", "160k");
+          }
+          args.push("-shortest", outputPath);
+          await new Promise((resolve, reject) => {
+            const proc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+            let stderr = "";
+            proc.stderr.on("data", (d) => {
+              stderr = (stderr + String(d || "")).slice(-12000);
+            });
+            proc.once("error", reject);
+            proc.once("exit", (code) => {
+              if (code === 0) resolve();
+              else reject(new Error(`ffmpeg frame-export failed (code=${code}): ${stderr}`));
+            });
+          });
+          frameExportJobs.delete(job.jobId);
+          const stat = await fs.stat(outputPath);
+          res.writeHead(200, {
+            "Content-Type": "video/mp4",
+            "Content-Length": String(Number(stat.size || 0)),
+            "Cache-Control": "no-store",
+          });
+          const stream = fsNative.createReadStream(outputPath);
+          stream.on("error", () => {
+            if (!res.headersSent) res.writeHead(500);
+            res.end("Frame export stream failed");
+          });
+          stream.pipe(res);
+          attachTmpDirCleanup(res, job.tmpDir);
+        } catch (err) {
+          if (job) {
+            frameExportJobs.delete(job.jobId);
+            await safeRemoveDir(job.tmpDir);
+          }
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Frame export finalize failed" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/frames/abort" && req.method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const jobId = String(body?.jobId || "");
+          const job = frameExportJobs.get(jobId);
+          if (job) {
+            frameExportJobs.delete(jobId);
+            await safeRemoveDir(job.tmpDir);
+          }
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not abort frame export job" }));
         }
         return;
       }

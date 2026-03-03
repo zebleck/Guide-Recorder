@@ -892,6 +892,12 @@ select:focus {
   color: #C4B5FD;
 }
 
+.timeline-segment.trim {
+  background: rgba(71, 215, 172, 0.14);
+  border: 1px solid rgba(71, 215, 172, 0.5);
+  color: #9ff3dd;
+}
+
 .timeline-segment.selected {
   transform: translateY(-2px);
 }
@@ -992,6 +998,11 @@ select:focus {
   box-shadow: 0 0 6px var(--accent-2-glow);
 }
 
+.timeline-segment.trim:hover .timeline-handle::after {
+  background: #47d7ac;
+  box-shadow: 0 0 6px rgba(71, 215, 172, 0.45);
+}
+
 /* Active resizing state */
 .dragging .timeline-segment.zoom .timeline-handle::after {
   background: var(--accent);
@@ -1001,6 +1012,11 @@ select:focus {
 .dragging .timeline-segment.text .timeline-handle::after {
   background: var(--accent-2);
   box-shadow: 0 0 8px var(--accent-2-glow);
+}
+
+.dragging .timeline-segment.trim .timeline-handle::after {
+  background: #47d7ac;
+  box-shadow: 0 0 8px rgba(71, 215, 172, 0.5);
 }
 
 .timeline-handle.left::after {

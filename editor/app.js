@@ -74,6 +74,20 @@ const ASPECT_PRESET_VALUES = {
   "3:4": 3 / 4,
   "21:9": 21 / 9,
 };
+const TEXT_FONT_OPTIONS = [
+  { label: "Segoe UI", value: "Segoe UI" },
+  { label: "Bricolage Grotesque", value: "Bricolage Grotesque" },
+  { label: "IBM Plex Mono", value: "IBM Plex Mono" },
+  { label: "Patrick Hand", value: "Patrick Hand" },
+  { label: "Arial", value: "Arial" },
+  { label: "Verdana", value: "Verdana" },
+  { label: "Trebuchet MS", value: "Trebuchet MS" },
+  { label: "Georgia", value: "Georgia" },
+  { label: "Times New Roman", value: "Times New Roman" },
+  { label: "Courier New", value: "Courier New" },
+];
+const DEBUG_TEXT_FONT = true;
+const textFontDebugSeen = new Set();
 
 const timelineHoverSec = {
   zoom: 0,
@@ -179,6 +193,96 @@ function updateSourceAspectOptionLabel(videoWidth, videoHeight) {
   const vh = Number(videoHeight || 0);
   if (vw > 0 && vh > 0) sourceOption.textContent = `Source (${vw}x${vh})`;
   else sourceOption.textContent = "Source";
+}
+
+function selectedTextFontFamily(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Segoe UI";
+  const patrickAliases = new Set([
+    "Patrick Hand",
+    "PatrickHand-Regular",
+    "PatrickHand",
+    "Patrick Hand Regular",
+    "PatrickHand-Regular.ttf",
+  ]);
+  if (patrickAliases.has(raw)) return "Patrick Hand";
+  return raw;
+}
+
+function textFontCssStack(value) {
+  const family = selectedTextFontFamily(value);
+  if (family === "Patrick Hand") {
+    return "'Patrick Hand','PatrickHand-Regular','PatrickHand','Patrick Hand Regular','Segoe UI',sans-serif";
+  }
+  const escaped = family.replace(/'/g, "\\'");
+  return `'${escaped}','Segoe UI',sans-serif`;
+}
+
+function installLocalPatrickFontAlias() {
+  if (document.getElementById("patrick-font-alias-style")) return;
+  const style = document.createElement("style");
+  style.id = "patrick-font-alias-style";
+  style.textContent = `
+@font-face {
+  font-family: "Patrick Hand";
+  src: local("Patrick Hand"),
+       local("PatrickHand-Regular"),
+       local("PatrickHand"),
+       local("Patrick Hand Regular");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+`;
+  document.head.appendChild(style);
+}
+
+function resolveCanvasFontSpec(fontSize, value) {
+  const family = selectedTextFontFamily(value);
+  const px = Math.max(1, Math.round(Number(fontSize || 12)));
+  const preferred = `${px}px '${family.replace(/'/g, "\\'")}'`;
+  const canUsePreferred = Boolean(document.fonts?.check?.(preferred));
+  if (canUsePreferred) return preferred;
+  return `${px}px ${textFontCssStack(family)}`;
+}
+
+function debugLogTextFontUsage(source, textEffect, requestedFontSpec, actualFontSpec = "") {
+  if (!DEBUG_TEXT_FONT) return;
+  const key = [
+    source,
+    String(textEffect?.startSec ?? ""),
+    String(textEffect?.endSec ?? ""),
+    String(textEffect?.value ?? ""),
+    String(textEffect?.fontFamily ?? ""),
+    requestedFontSpec,
+    actualFontSpec,
+  ].join("|");
+  if (textFontDebugSeen.has(key)) return;
+  textFontDebugSeen.add(key);
+  console.log("[text-font-debug]", {
+    source,
+    rawFontFamily: textEffect?.fontFamily,
+    normalizedFontFamily: selectedTextFontFamily(textEffect?.fontFamily),
+    requestedFontSpec,
+    actualFontSpec,
+    text: textEffect?.value,
+    startSec: textEffect?.startSec,
+    endSec: textEffect?.endSec,
+  });
+}
+
+function textFontOptionsHtml(selectedValue) {
+  const active = selectedTextFontFamily(selectedValue);
+  let options = TEXT_FONT_OPTIONS.map((opt) => {
+    const isSelected = opt.value === active ? " selected" : "";
+    const escaped = opt.value.replace(/"/g, "&quot;");
+    return `<option value="${escaped}" style="font-family:${textFontCssStack(opt.value)}"${isSelected}>${opt.label}</option>`;
+  });
+  if (!TEXT_FONT_OPTIONS.some((opt) => opt.value === active)) {
+    const escaped = active.replace(/"/g, "&quot;");
+    options = [`<option value="${escaped}" style="font-family:${textFontCssStack(active)}" selected>${escaped}</option>`, ...options];
+  }
+  return options.join("");
 }
 
 function sourceDurationSecFor(sourceDuration) {
@@ -367,22 +471,27 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
         <label>Y (%)<input data-key="yPct" type="number" min="0" max="100" step="1" value="${Math.round(Number(effect.yPct || 0))}" /></label>
       </div>
       <label>Text<input data-key="value" type="text" value="${String(effect.value || "").replace(/"/g, "&quot;")}" /></label>
+      <div class="row">
+        <button type="button" class="ghost-btn" data-action="centerText">Center Text</button>
+      </div>
       <div class="grid2">
         <label>Font Size (px)<input data-key="fontSize" type="number" min="8" max="200" step="1" value="${Math.round(Number(effect.fontSize || 22))}" /></label>
+        <label>Font<select data-key="fontFamily">${textFontOptionsHtml(effect.fontFamily)}</select></label>
         <label>Color<input data-key="color" type="color" value="${effect.color || "#ffffff"}" /></label>
         <label>Background<input data-key="bgColor" type="color" value="${effect.bgColor || "#000000"}" /></label>
-        <label>BG Opacity<input data-key="bgOpacity" type="number" min="0" max="100" step="5" value="${Math.round(Number(effect.bgOpacity ?? 68))}" /></label>
+        <label>BG Alpha (%)<input data-key="bgOpacity" type="range" min="0" max="100" step="1" value="${Math.round(Number(effect.bgOpacity ?? 68))}" /></label>
+        <label>BG Alpha Value<input data-key="bgOpacity" type="number" min="0" max="100" step="1" value="${Math.round(Number(effect.bgOpacity ?? 68))}" /></label>
       </div>
     `;
   }
 
-  for (const input of effectEditorFields.querySelectorAll("input")) {
-    input.addEventListener("input", () => {
+  for (const input of effectEditorFields.querySelectorAll("input, select")) {
+    const onFieldChange = () => {
       const active = editingEffect?.effect;
       if (!active) return;
       const key = input.dataset.key;
       if (!key) return;
-      if (key === "value" || key === "color" || key === "bgColor") {
+      if (key === "value" || key === "color" || key === "bgColor" || key === "fontFamily") {
         active[key] = String(input.value || "");
       } else {
         active[key] = Number(input.value || 0);
@@ -393,10 +502,59 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       } else {
         active.xPct = Math.max(0, Math.min(100, Number(active.xPct || 0)));
         active.yPct = Math.max(0, Math.min(100, Number(active.yPct || 0)));
+        active.bgOpacity = Math.max(0, Math.min(100, Number(active.bgOpacity ?? 68)));
+        active.fontFamily = selectedTextFontFamily(active.fontFamily);
+        if (key === "fontFamily" && DEBUG_TEXT_FONT) {
+          if (document.fonts?.load) {
+            document.fonts.load(`16px '${active.fontFamily.replace(/'/g, "\\'")}'`).catch(() => {});
+          }
+          console.log("[text-font-debug] font picker change", {
+            selected: input.value,
+            normalized: active.fontFamily,
+            cssStack: textFontCssStack(active.fontFamily),
+            requestedSpec: resolveCanvasFontSpec(16, active.fontFamily),
+            checkPatrickHand: document.fonts?.check?.("16px 'Patrick Hand'") ?? null,
+            checkPatrickHandRegular: document.fonts?.check?.("16px 'PatrickHand-Regular'") ?? null,
+          });
+        }
+        const fontSelect = effectEditorFields.querySelector('select[data-key="fontFamily"]');
+        if (fontSelect) fontSelect.style.fontFamily = textFontCssStack(active.fontFamily);
+        if (key === "bgOpacity") {
+          const synced = String(Math.round(Number(active.bgOpacity ?? 68)));
+          for (const peer of effectEditorFields.querySelectorAll('input[data-key="bgOpacity"]')) {
+            if (peer !== input) peer.value = synced;
+          }
+        }
       }
       clampEffectBounds(active);
       sortEffects();
       editingEffect.index = effectsFor(kind).indexOf(active);
+      renderEffectsTimeline();
+      syncPlaybackUi();
+      queueDraftProjectPersist();
+    };
+    input.addEventListener("input", onFieldChange);
+    input.addEventListener("change", onFieldChange);
+  }
+
+  if (kind === "text") {
+    const fontSelect = effectEditorFields.querySelector('select[data-key="fontFamily"]');
+    if (fontSelect) fontSelect.style.fontFamily = textFontCssStack(effect.fontFamily);
+  }
+
+  for (const btn of effectEditorFields.querySelectorAll("button[data-action]")) {
+    btn.addEventListener("click", () => {
+      const active = editingEffect?.effect;
+      if (!active || kind !== "text") return;
+      const action = btn.dataset.action;
+      if (action !== "centerText") return;
+      active.xPct = 50;
+      active.yPct = 50;
+      active.align = "center";
+      const xInput = effectEditorFields.querySelector('input[data-key="xPct"]');
+      const yInput = effectEditorFields.querySelector('input[data-key="yPct"]');
+      if (xInput) xInput.value = "50";
+      if (yInput) yInput.value = "50";
       renderEffectsTimeline();
       syncPlaybackUi();
       queueDraftProjectPersist();
@@ -897,16 +1055,23 @@ function drawTextOverlays(currentMs) {
     const x = (t.xPct / 100) * canvas.width;
     const y = (t.yPct / 100) * canvas.height;
     const fontSize = Number(t.fontSize || 22);
+    const align = t.align === "center" ? "center" : "left";
+    const fontFamily = selectedTextFontFamily(t.fontFamily);
 
     const pad = 8;
-    ctx.font = `bold ${fontSize}px Segoe UI`;
+    const requestedFontSpec = resolveCanvasFontSpec(fontSize, fontFamily);
+    ctx.font = requestedFontSpec;
+    debugLogTextFontUsage("preview", t, requestedFontSpec, ctx.font);
+    ctx.textAlign = align;
     const w = ctx.measureText(t.value).width + pad * 2;
     const h = fontSize + pad * 2;
 
     ctx.fillStyle = textBgRgba(t);
-    ctx.fillRect(x - pad, y - fontSize - pad + 4, w, h);
+    const bgX = align === "center" ? x - w / 2 : x - pad;
+    ctx.fillRect(bgX, y - fontSize - pad + 4, w, h);
     ctx.fillStyle = t.color || "#ffffff";
     ctx.fillText(t.value, x, y);
+    ctx.textAlign = "left";
   }
 }
 
@@ -1137,15 +1302,22 @@ function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
     const x = (t.xPct / 100) * width;
     const y = (t.yPct / 100) * height;
     const fontSize = Number(t.fontSize || 22);
+    const align = t.align === "center" ? "center" : "left";
+    const fontFamily = selectedTextFontFamily(t.fontFamily);
     const pad = 8;
 
-    renderCtx.font = `bold ${fontSize}px Segoe UI`;
+    const requestedFontSpec = resolveCanvasFontSpec(fontSize, fontFamily);
+    renderCtx.font = requestedFontSpec;
+    debugLogTextFontUsage("export", t, requestedFontSpec, renderCtx.font);
+    renderCtx.textAlign = align;
     const w = renderCtx.measureText(t.value).width + pad * 2;
     const h = fontSize + pad * 2;
     renderCtx.fillStyle = textBgRgba(t);
-    renderCtx.fillRect(x - pad, y - fontSize - pad + 4, w, h);
+    const bgX = align === "center" ? x - w / 2 : x - pad;
+    renderCtx.fillRect(bgX, y - fontSize - pad + 4, w, h);
     renderCtx.fillStyle = t.color || "#ffffff";
     renderCtx.fillText(t.value, x, y);
+    renderCtx.textAlign = "left";
   }
 }
 
@@ -1507,17 +1679,18 @@ function renderOverlay() {
   if (!videoEl.src) return;
 
   fitCanvasToVideo();
-  const rawSec = snapNearZero(videoEl.currentTime);
-  const currentMs = Math.max(0, rawSec * 1000);
-  const uiSec = uiCurrentSec(rawSec);
-  const curSec = currentMs / 1000;
+  const mediaSec = snapNearZero(videoEl.currentTime);
+  const currentMs = Math.max(0, mediaSec * 1000);
+  const trimmedSec = mediaToTrimmedSec(mediaSec, videoEl.duration);
+  const uiSec = uiCurrentSec(trimmedSec);
   const dur = effectiveDurationSec();
-  updateTimelinePlayhead(uiSec, dur);
+  const cur = dur > 0 ? Math.min(uiSec, dur) : uiSec;
+  updateTimelinePlayhead(mediaSec, timelineDurationSec());
   if (!isSeeking) {
-    if (dur > 0) seekBar.value = String(Math.round((uiSec / dur) * 1000));
+    if (dur > 0) seekBar.value = String(Math.round((cur / dur) * 1000));
     else seekBar.value = "0";
   }
-  timeLabel.textContent = `${formatClock(uiSec)} / ${formatClock(dur)}`;
+  timeLabel.textContent = `${formatClock(cur)} / ${formatClock(dur)}`;
   playPauseBtn.textContent = videoEl.paused ? "Play" : "Pause";
   const previewDims = outputDimensionsForSource(videoEl.videoWidth || canvas.width, videoEl.videoHeight || canvas.height);
   const frame = ensurePreviewFrameBuffer(previewDims.width, previewDims.height);
@@ -2045,8 +2218,10 @@ function addEffectAt(kind, atSec) {
     endSec,
     xPct: 12,
     yPct: 12,
+    align: "left",
     value: "Text",
     fontSize: 22,
+    fontFamily: "Segoe UI",
     color: "#ffffff",
     bgColor: "#000000",
     bgOpacity: 68,
@@ -2330,6 +2505,14 @@ window.addEventListener("keydown", (e) => {
 });
 
 setStatus("Idle. Load recording JSON/video to begin editing.");
+installLocalPatrickFontAlias();
+if (DEBUG_TEXT_FONT) {
+  console.log("[text-font-debug] startup font checks", {
+    patrickHand: document.fonts?.check?.("16px 'Patrick Hand'") ?? null,
+    patrickHandRegular: document.fonts?.check?.("16px 'PatrickHand-Regular'") ?? null,
+    segoeUI: document.fonts?.check?.("16px 'Segoe UI'") ?? null,
+  });
+}
 refreshActionButtons();
 syncAspectPresetUi();
 updateSourceAspectOptionLabel(0, 0);

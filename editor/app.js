@@ -1755,6 +1755,18 @@ async function exportFinalVideo() {
   exportFinalBtn.disabled = true;
   setStatus("Exporting final video with effects...");
 
+  const hasTimelineEffects = (project.zooms?.length || 0) > 0 || (project.texts?.length || 0) > 0;
+  const hasInteractionOverlays = (project.events?.length || 0) > 0;
+  if (!hasTimelineEffects && !hasInteractionOverlays) {
+    const desktopMp4 = await tryDesktopExportJob();
+    if (desktopMp4) {
+      downloadBlob(desktopMp4, "guide-recorder-final.mp4");
+      setStatus("Final video exported as MP4 via desktop FFmpeg.");
+      exportFinalBtn.disabled = false;
+      return;
+    }
+  }
+
   let exportVideo = null;
   let exportStream = null;
   let raf = 0;
@@ -1816,8 +1828,24 @@ async function exportFinalVideo() {
     });
 
     let done = false;
+    let lastMediaSec = trimStartSec;
+    let lastAdvanceAt = performance.now();
+    let lastRecoverAt = 0;
     const drawLoop = () => {
       const mediaSec = Math.max(trimStartSec, Number(exportVideo.currentTime || 0));
+      const now = performance.now();
+      if (mediaSec > lastMediaSec + 0.0005) {
+        lastMediaSec = mediaSec;
+        lastAdvanceAt = now;
+      } else if (now - lastAdvanceAt > 1200 && now - lastRecoverAt > 1200) {
+        lastRecoverAt = now;
+        try {
+          exportVideo.pause();
+          exportVideo.play().catch(() => {});
+        } catch {
+          // ignore
+        }
+      }
       const relSec = Math.max(0, mediaSec - trimStartSec);
       const clampedRelMs = targetDurationMs > 0 ? Math.min(relSec * 1000, targetDurationMs) : relSec * 1000;
       const renderMs = trimStartSec * 1000 + clampedRelMs;
@@ -1839,7 +1867,10 @@ async function exportFinalVideo() {
 
     renderExportFrame(exportCtx, exportVideo, trimStartSec * 1000, width, height);
     recorder.start(100);
-    if (trimStartSec > 0) exportVideo.currentTime = trimStartSec;
+    if (trimStartSec > 0) {
+      exportVideo.currentTime = trimStartSec;
+      await waitForMediaEvent(exportVideo, "seeked");
+    }
     await exportVideo.play();
     raf = requestAnimationFrame(drawLoop);
 
@@ -1849,8 +1880,13 @@ async function exportFinalVideo() {
     const blob = new Blob(exportChunks, {
       type: recorder.mimeType || "video/webm",
     });
-    downloadBlob(blob, "guide-recorder-final.webm");
-    setStatus("Final video exported with effects.");
+    const mp4Blob = await tryDesktopTranscodeMp4(blob, fps);
+    const mp4Ok = mp4Blob ? await validateVideoBlobDuration(mp4Blob, targetDurationSec * 0.9) : false;
+    if (!mp4Blob || !mp4Ok) {
+      throw new Error("MP4 transcode failed or produced invalid output.");
+    }
+    downloadBlob(mp4Blob, "guide-recorder-final.mp4");
+    setStatus("Final video exported with effects (MP4 via FFmpeg).");
   } catch (err) {
     setStatus(`Export failed: ${err.message || String(err)}`);
   } finally {
@@ -1920,6 +1956,75 @@ function downloadBlob(blob, fileName) {
   a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+async function validateVideoBlobDuration(blob, minDurationSec) {
+  if (!blob || blob.size <= 0) return false;
+  const url = URL.createObjectURL(blob);
+  try {
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.src = url;
+    await waitForMediaEvent(probe, "loadedmetadata");
+    const dur = Number(probe.duration || 0);
+    if (!Number.isFinite(dur) || dur <= 0) return false;
+    if (minDurationSec > 0 && dur + 0.05 < minDurationSec) return false;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function isDesktopAutoloadVideoSource() {
+  const src = String(videoEl.currentSrc || videoEl.src || "");
+  return src.includes("/__desktop/latest.video");
+}
+
+async function tryDesktopExportJob() {
+  if (!isDesktopAutoloadVideoSource()) return null;
+  const payload = {
+    trimStartSec: Number(project.trimStartSec || 0),
+    trimEndSec: Number(project.trimEndSec || 0),
+    aspectPreset: normalizeAspectPreset(project.aspectPreset),
+    zoomCount: Array.isArray(project.zooms) ? project.zooms.length : 0,
+    textCount: Array.isArray(project.texts) ? project.texts.length : 0,
+    eventCount: Array.isArray(project.events) ? project.events.length : 0,
+  };
+  try {
+    const resp = await fetch("/__desktop/export/job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    if (!blob || blob.size <= 0) return null;
+    return new Blob([blob], { type: "video/mp4" });
+  } catch {
+    return null;
+  }
+}
+
+async function tryDesktopTranscodeMp4(sourceBlob, fps = 60) {
+  if (!sourceBlob || sourceBlob.size <= 0) return null;
+  try {
+    const resp = await fetch("/__desktop/transcode/mp4", {
+      method: "POST",
+      headers: {
+        "Content-Type": sourceBlob.type || "video/webm",
+        "X-Export-Fps": String(Math.max(12, Math.min(120, Math.round(Number(fps) || 60)))),
+      },
+      body: sourceBlob,
+    });
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    if (!blob || blob.size <= 0) return null;
+    return new Blob([blob], { type: "video/mp4" });
+  } catch {
+    return null;
+  }
 }
 
 function saveProjectJson() {

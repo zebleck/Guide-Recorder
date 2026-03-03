@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
+const os = require("node:os");
 
 // Windows: avoid noisy/unstable WGC capture path and Chromium log spam.
 app.commandLine.appendSwitch("disable-features", "WebRtcAllowWgcDesktopCapturer");
@@ -535,6 +536,84 @@ async function ensureEditorServer() {
       const requestUrl = new URL(req.url || "/", `http://localhost:${editorServerPort}`);
       const pathname = decodeURIComponent(requestUrl.pathname);
 
+      if (pathname === "/__desktop/export/job" && req.method === "POST") {
+        if (!latestSaved.videoPath) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "No recording video available for desktop export." }));
+          return;
+        }
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-export-job-"));
+        const outputPath = path.join(tmpDir, "final.mp4");
+        try {
+          const manifest = await readJsonBody(req);
+          await verifyFfmpegAvailable();
+          const dims = await probeVideoDimensions(latestSaved.videoPath);
+          const args = ffmpegArgsEditorExport(latestSaved.videoPath, outputPath, manifest, dims);
+          await new Promise((resolve, reject) => {
+            const proc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+            let stderr = "";
+            proc.stderr.on("data", (d) => {
+              stderr = (stderr + String(d || "")).slice(-10000);
+            });
+            proc.once("error", reject);
+            proc.once("exit", (code) => {
+              if (code === 0) resolve();
+              else reject(new Error(`ffmpeg export failed (code=${code}): ${stderr}`));
+            });
+          });
+          const stat = await fs.stat(outputPath);
+          res.writeHead(200, {
+            "Content-Type": "video/mp4",
+            "Content-Length": String(Number(stat.size || 0)),
+            "Cache-Control": "no-store",
+          });
+          const stream = fsNative.createReadStream(outputPath);
+          stream.on("error", () => {
+            if (!res.headersSent) res.writeHead(500);
+            res.end("Export stream failed");
+          });
+          stream.pipe(res);
+          attachTmpDirCleanup(res, tmpDir);
+        } catch (err) {
+          await safeRemoveDir(tmpDir);
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Desktop export failed" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/transcode/mp4" && req.method === "POST") {
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-transcode-"));
+        const inputPath = path.join(tmpDir, "input.webm");
+        const outputPath = path.join(tmpDir, "output.mp4");
+        try {
+          const requestedFpsRaw = Number(req.headers["x-export-fps"] || 0);
+          const requestedFps = Number.isFinite(requestedFpsRaw) && requestedFpsRaw > 0
+            ? Math.max(12, Math.min(120, requestedFpsRaw))
+            : 0;
+          await writeRequestBodyToFile(req, inputPath);
+          await transcodeWebmToMp4(inputPath, outputPath, requestedFps);
+          const stat = await fs.stat(outputPath);
+          res.writeHead(200, {
+            "Content-Type": "video/mp4",
+            "Content-Length": String(Number(stat.size || 0)),
+            "Cache-Control": "no-store",
+          });
+          const stream = fsNative.createReadStream(outputPath);
+          stream.on("error", () => {
+            if (!res.headersSent) res.writeHead(500);
+            res.end("Transcode stream failed");
+          });
+          stream.pipe(res);
+          attachTmpDirCleanup(res, tmpDir);
+        } catch (err) {
+          await safeRemoveDir(tmpDir);
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Transcode failed" }));
+        }
+        return;
+      }
+
       if (pathname === "/__desktop/latest.video") {
         if (!latestSaved.videoPath) {
           res.writeHead(404);
@@ -669,6 +748,271 @@ async function waitForFileReady(filePath, minBytes = 256, timeoutMs = 20000) {
   }
 
   return false;
+}
+
+function attachTmpDirCleanup(res, tmpDir) {
+  let started = false;
+  const trigger = () => {
+    if (started) return;
+    started = true;
+    void safeRemoveDir(tmpDir);
+  };
+  res.once("finish", trigger);
+  res.once("close", trigger);
+}
+
+async function safeRemoveDir(dirPath) {
+  if (!dirPath) return;
+  const maxAttempts = 8;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      await fs.rm(dirPath, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      const code = String(err?.code || "");
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 80 + attempt * 120));
+    }
+  }
+}
+
+async function writeRequestBodyToFile(req, outputPath) {
+  await new Promise((resolve, reject) => {
+    const out = fsNative.createWriteStream(outputPath);
+    const onErr = (err) => reject(err);
+    req.on("error", onErr);
+    out.on("error", onErr);
+    out.on("finish", resolve);
+    req.pipe(out);
+  });
+}
+
+async function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
+  const chunks = [];
+  let total = 0;
+  await new Promise((resolve, reject) => {
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", resolve);
+    req.on("error", reject);
+  });
+  const raw = Buffer.concat(chunks).toString("utf8");
+  return raw ? JSON.parse(raw) : {};
+}
+
+async function transcodeWebmToMp4(inputPath, outputPath, requestedFps = 0) {
+  await verifyFfmpegAvailable();
+  let targetFps = requestedFps;
+  if (!(targetFps > 0)) {
+    try {
+      targetFps = await probeVideoFps(inputPath);
+    } catch {
+      targetFps = 60;
+    }
+  }
+  targetFps = Math.max(12, Math.min(120, Math.round(targetFps)));
+  await new Promise((resolve, reject) => {
+    const args = [
+      "-y",
+      "-fflags",
+      "+genpts",
+      "-i",
+      inputPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a?",
+      "-vf",
+      `fps=${targetFps},setpts=PTS-STARTPTS`,
+      "-vsync",
+      "cfr",
+      "-r",
+      String(targetFps),
+      "-avoid_negative_ts",
+      "make_zero",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "medium",
+      "-crf",
+      "18",
+      "-pix_fmt",
+      "yuv420p",
+      "-profile:v",
+      "high",
+      "-movflags",
+      "+faststart",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "160k",
+      "-af",
+      "aresample=async=1:first_pts=0,asetpts=N/SR/TB",
+      "-shortest",
+      outputPath,
+    ];
+    const proc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr = (stderr + String(d || "")).slice(-10000);
+    });
+    proc.once("error", reject);
+    proc.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg transcode failed (code=${code}): ${stderr}`));
+    });
+  });
+}
+
+async function probeVideoFps(inputPath) {
+  return await new Promise((resolve, reject) => {
+    const args = [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=avg_frame_rate,r_frame_rate",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      inputPath,
+    ];
+    const proc = spawn("ffprobe", args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      out += String(d || "");
+    });
+    proc.once("error", reject);
+    proc.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error("ffprobe fps probe failed"));
+        return;
+      }
+      const lines = out
+        .split(/\r?\n/g)
+        .map((v) => String(v || "").trim())
+        .filter(Boolean);
+      const parseRatio = (text) => {
+        const m = /^(\d+)\s*\/\s*(\d+)$/.exec(text);
+        if (m) {
+          const den = Number(m[2]);
+          if (den > 0) return Number(m[1]) / den;
+        }
+        const asNum = Number(text);
+        return Number.isFinite(asNum) ? asNum : 0;
+      };
+      for (const line of lines) {
+        const fps = parseRatio(line);
+        if (fps > 0 && Number.isFinite(fps)) {
+          resolve(fps);
+          return;
+        }
+      }
+      reject(new Error("No parseable fps from ffprobe"));
+    });
+  });
+}
+
+function aspectRatioForPreset(preset, sourceW, sourceH) {
+  const map = {
+    "16:9": 16 / 9,
+    "1:1": 1,
+    "9:16": 9 / 16,
+    "4:3": 4 / 3,
+    "3:4": 3 / 4,
+    "21:9": 21 / 9,
+  };
+  if (!preset || preset === "source") return sourceW / Math.max(1, sourceH);
+  return map[preset] || sourceW / Math.max(1, sourceH);
+}
+
+async function probeVideoDimensions(inputPath) {
+  return await new Promise((resolve, reject) => {
+    const args = [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=p=0:s=x",
+      inputPath,
+    ];
+    const proc = spawn("ffprobe", args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      out += String(d || "");
+    });
+    proc.once("error", reject);
+    proc.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error("ffprobe failed"));
+        return;
+      }
+      const raw = out.trim();
+      const m = /^(\d+)x(\d+)$/.exec(raw);
+      if (!m) {
+        reject(new Error("Could not parse video dimensions"));
+        return;
+      }
+      resolve({ width: Number(m[1]), height: Number(m[2]) });
+    });
+  });
+}
+
+function ffmpegArgsEditorExport(inputPath, outputPath, manifest, dims) {
+  const trimStartSec = Math.max(0, Number(manifest?.trimStartSec || 0));
+  const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
+  const hasTrimEnd = Number.isFinite(trimEndSecRaw) && trimEndSecRaw > trimStartSec;
+  const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
+  const sourceAspect = dims.width / Math.max(1, dims.height);
+  let vf = "";
+  if (Math.abs(targetAspect - sourceAspect) > 0.0001) {
+    if (targetAspect > sourceAspect) {
+      vf = `crop=iw:trunc(iw/${targetAspect}/2)*2:(iw-trunc(iw/${targetAspect}/2)*2)/2`;
+    } else {
+      vf = `crop=trunc(ih*${targetAspect}/2)*2:ih:(iw-trunc(ih*${targetAspect}/2)*2)/2:0`;
+    }
+  }
+
+  const args = ["-y"];
+  if (trimStartSec > 0) {
+    args.push("-ss", trimStartSec.toFixed(3));
+  }
+  args.push("-i", inputPath);
+  if (hasTrimEnd) {
+    args.push("-to", trimEndSecRaw.toFixed(3));
+  }
+  if (vf) {
+    args.push("-vf", vf);
+  }
+  args.push(
+    "-c:v",
+    "libx264",
+    "-preset",
+    "slow",
+    "-crf",
+    "17",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "160k",
+    outputPath
+  );
+  return args;
 }
 
 async function verifyFfmpegAvailable() {

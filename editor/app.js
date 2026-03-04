@@ -1223,7 +1223,7 @@ function drawClickBursts(currentMs, zoomViewport, contentRect) {
         ? `rgba(249,95,98,${alpha})`
         : evt.button === 1
           ? `rgba(255,200,0,${alpha})`
-          : `rgba(0,255,102,${alpha})`;
+          : `rgba(22,163,74,${alpha})`;
     ctx.strokeStyle = color;
     ctx.stroke();
   }
@@ -1295,7 +1295,7 @@ function textBoxMetrics(renderCtx, textValue, fontSize, pad) {
   const textBlockH = ascent + descent + Math.max(0, safeLines.length - 1) * lineHeight;
   const padX = pad;
   const padTop = pad;
-  const padBottom = Math.max(4, Math.round(pad * 0.55));
+  const padBottom = Math.max(2, Math.round(pad * 0.2));
   const boxW = width + padX * 2;
   const boxH = textBlockH + padTop + padBottom;
   const baselineY = 0;
@@ -1797,7 +1797,7 @@ function drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport, ra
         ? `rgba(249,95,98,${alpha})`
         : evt.button === 1
           ? `rgba(255,200,0,${alpha})`
-          : `rgba(0,255,102,${alpha})`;
+          : `rgba(22,163,74,${alpha})`;
     renderCtx.strokeStyle = color;
     renderCtx.stroke();
   }
@@ -3134,9 +3134,6 @@ async function tryDesktopAutoLoad() {
     const data = await jsonResp.json();
 
     await applyLoadedProjectData(data);
-    // Desktop autoload should always start with full active range.
-    project.trimStartSec = 0;
-    project.trimEndSec = 0;
 
     if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(importedVideoUrl);
@@ -3166,9 +3163,7 @@ loadProjectInput.addEventListener("change", async (e) => {
 loadVideoInput.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  // A newly loaded standalone video should start untrimmed.
-  project.trimStartSec = 0;
-  project.trimEndSec = 0;
+  // Preserve loaded trim bounds (from project/draft) when attaching video.
   if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
     URL.revokeObjectURL(importedVideoUrl);
   }

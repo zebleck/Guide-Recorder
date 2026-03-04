@@ -45,6 +45,8 @@ const cursorTextureInput = document.getElementById("cursorTextureInput");
 const cursorTextureClearBtn = document.getElementById("cursorTextureClearBtn");
 const cursorHotspotXInput = document.getElementById("cursorHotspotX");
 const cursorHotspotYInput = document.getElementById("cursorHotspotY");
+const cursorMotionModeSelect = document.getElementById("cursorMotionMode");
+const cursorSplineGuideHzInput = document.getElementById("cursorSplineGuideHz");
 const cursorPreviewCanvas = document.getElementById("cursorPreviewCanvas");
 const cursorPreviewCtx = cursorPreviewCanvas.getContext("2d");
 const renderTransportSelect = document.getElementById("renderTransportSelect");
@@ -134,6 +136,8 @@ const project = {
   cursorTextureName: "",
   cursorHotspotX: 0,
   cursorHotspotY: 0,
+  cursorMotionMode: "raw",
+  cursorSplineGuideHz: 18,
   aspectPreset: "source",
   trimStartSec: 0,
   trimEndSec: 0,
@@ -459,6 +463,35 @@ function toggleCursorPopover(show) {
   if (!cursorPopover) return;
   if (show) cursorPopover.classList.remove("hidden");
   else cursorPopover.classList.add("hidden");
+}
+
+function normalizeCursorMotionMode(value) {
+  const raw = String(value || "raw");
+  if (raw === "smooth") return "spline";
+  if (raw === "linear" || raw === "spline") return raw;
+  return "raw";
+}
+
+function syncCursorMotionModeUi() {
+  if (!cursorMotionModeSelect) return;
+  cursorMotionModeSelect.value = normalizeCursorMotionMode(project.cursorMotionMode);
+  if (cursorSplineGuideHzInput) {
+    cursorSplineGuideHzInput.value = String(normalizeCursorSplineGuideHz(project.cursorSplineGuideHz));
+    const splineMode = normalizeCursorMotionMode(project.cursorMotionMode) === "spline";
+    cursorSplineGuideHzInput.disabled = !splineMode;
+  }
+}
+
+function normalizeCursorSplineGuideHz(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 18;
+  return Math.max(2, Math.min(60, Math.round(n)));
+}
+
+function legacySmoothStrengthToGuideHz(value) {
+  const s = Number(value);
+  if (!Number.isFinite(s)) return 18;
+  return normalizeCursorSplineGuideHz(2 + (58 * Math.max(0, Math.min(100, s)) / 100));
 }
 
 function toggleRenderSettingsPopover(show) {
@@ -1019,6 +1052,8 @@ function persistCursorPrefsToLocalStorage() {
       cursorTextureName: project.cursorTextureName || "",
       cursorHotspotX: Number(project.cursorHotspotX || 0),
       cursorHotspotY: Number(project.cursorHotspotY || 0),
+      cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
+      cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     };
     window.localStorage.setItem(CURSOR_PREFS_STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -1041,9 +1076,17 @@ async function loadCursorPrefsFromLocalStorage() {
     project.cursorOffsetY = Number(data.cursorOffsetY || 0);
     project.cursorHotspotX = Number(data.cursorHotspotX || 0);
     project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+    project.cursorMotionMode = normalizeCursorMotionMode(data.cursorMotionMode);
+    project.cursorSplineGuideHz = data.cursorSplineGuideHz != null
+      ? normalizeCursorSplineGuideHz(data.cursorSplineGuideHz)
+      : legacySmoothStrengthToGuideHz(data.cursorSmoothStrength);
     project.cursorTextureName = String(data.cursorTextureName || "");
     cursorOffsetXInput.value = String(project.cursorOffsetX);
     cursorOffsetYInput.value = String(project.cursorOffsetY);
+    if (cursorSplineGuideHzInput) {
+      cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
+    }
+    syncCursorMotionModeUi();
     syncCursorHotspotInputs();
     await loadCursorTextureFromDataUrl(
       String(data.cursorTextureDataUrl || ""),
@@ -1386,27 +1429,242 @@ function eventToCanvasPosition(evt) {
   return null;
 }
 
-function pointerAt(currentMs) {
-  const evts = project.events;
-  const hi = bisectEvents(currentMs);
-  let prevEvt = null;
-  for (let i = hi; i >= 0; i -= 1) {
+function isPointerEventType(type) {
+  return type === "mouse_move" || type === "mouse_down" || type === "mouse_up";
+}
+
+const cursorSplineTrackCache = {
+  key: "",
+  anchors: [],
+};
+
+function findPrevPointerEventIndex(evts, startIndex) {
+  for (let i = Math.max(0, Number(startIndex || 0)); i >= 0; i -= 1) {
+    if (isPointerEventType(evts[i]?.type)) return i;
+  }
+  return -1;
+}
+
+function findNextPointerEventIndex(evts, startIndex) {
+  for (let i = Math.max(0, Number(startIndex || 0)); i < evts.length; i += 1) {
+    if (isPointerEventType(evts[i]?.type)) return i;
+  }
+  return -1;
+}
+
+function tryPinnedClickPosition(currentMs, centerIdx, evts, toPos) {
+  const CLICK_PIN_MS = 6;
+  const lo = Math.max(0, centerIdx - 10);
+  const hi = Math.min(evts.length - 1, centerIdx + 10);
+  for (let i = lo; i <= hi; i += 1) {
     const evt = evts[i];
-    if (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up") {
-      prevEvt = evt;
-      break;
+    if (evt?.type !== "mouse_down" && evt?.type !== "mouse_up") continue;
+    const dt = Math.abs(Number(evt.t || 0) - currentMs);
+    if (dt > CLICK_PIN_MS) continue;
+    if (evt.inFrame === false) continue;
+    const pos = toPos(evt);
+    if (!pos) continue;
+    return { inFrame: true, x: pos.x, y: pos.y };
+  }
+  return null;
+}
+
+function normalizedPointerFromEvent(evt) {
+  const xr = eventRatio(evt, "x");
+  const yr = eventRatio(evt, "y");
+  if (xr != null && yr != null) {
+    return { x: xr, y: yr };
+  }
+  const b = project.captureBounds;
+  if (
+    b
+    && Number.isFinite(Number(evt?.x))
+    && Number.isFinite(Number(evt?.y))
+    && Number(b.width) > 0
+    && Number(b.height) > 0
+  ) {
+    const nx = (Number(evt.x) - Number(b.x || 0)) / Number(b.width);
+    const ny = (Number(evt.y) - Number(b.y || 0)) / Number(b.height);
+    return { x: clamp01(nx), y: clamp01(ny) };
+  }
+  return null;
+}
+
+function cursorSplineCacheKey(guideHz) {
+  const evts = project.events;
+  const last = evts.length ? evts[evts.length - 1] : null;
+  const cb = project.captureBounds || {};
+  return [
+    normalizeCursorSplineGuideHz(guideHz),
+    evts.length,
+    Number(last?.t || 0).toFixed(3),
+    Number(cb.x || 0),
+    Number(cb.y || 0),
+    Number(cb.width || 0),
+    Number(cb.height || 0),
+  ].join("|");
+}
+
+function pushSplineAnchor(anchors, t, x, y, isClick = false) {
+  const tx = Number(t || 0);
+  const ax = clamp01(Number(x || 0));
+  const ay = clamp01(Number(y || 0));
+  if (!anchors.length) {
+    anchors.push({ t: tx, x: ax, y: ay, click: Boolean(isClick) });
+    return;
+  }
+  const last = anchors[anchors.length - 1];
+  if (Math.abs(Number(last.t) - tx) < 0.0001) {
+    if (isClick || !last.click) {
+      last.t = tx;
+      last.x = ax;
+      last.y = ay;
+      last.click = Boolean(isClick);
     }
+    return;
+  }
+  anchors.push({ t: tx, x: ax, y: ay, click: Boolean(isClick) });
+}
+
+function getSplineCursorAnchors(guideHz) {
+  const key = cursorSplineCacheKey(guideHz);
+  if (cursorSplineTrackCache.key === key) return cursorSplineTrackCache.anchors;
+
+  const evts = project.events;
+  const anchors = [];
+  const stepMs = 1000 / Math.max(1, normalizeCursorSplineGuideHz(guideHz));
+  let nextGuideT = Number.NEGATIVE_INFINITY;
+  let lastPointer = null;
+
+  for (let i = 0; i < evts.length; i += 1) {
+    const evt = evts[i];
+    if (!isPointerEventType(evt?.type)) continue;
+    if (evt.inFrame === false) continue;
+    const norm = normalizedPointerFromEvent(evt);
+    if (!norm) continue;
+    const t = Number(evt.t || 0);
+    const isClick = evt.type === "mouse_down" || evt.type === "mouse_up";
+    if (!anchors.length) {
+      pushSplineAnchor(anchors, t, norm.x, norm.y, isClick);
+      nextGuideT = t + stepMs;
+      lastPointer = { t, x: norm.x, y: norm.y };
+      continue;
+    }
+    if (isClick || t >= nextGuideT) {
+      pushSplineAnchor(anchors, t, norm.x, norm.y, isClick);
+      nextGuideT = t + stepMs;
+    }
+    lastPointer = { t, x: norm.x, y: norm.y };
+  }
+  if (lastPointer) {
+    pushSplineAnchor(anchors, lastPointer.t, lastPointer.x, lastPointer.y, false);
   }
 
-  const rect = videoContentRect();
-  if (!prevEvt || prevEvt.inFrame === false) {
-    return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  cursorSplineTrackCache.key = key;
+  cursorSplineTrackCache.anchors = anchors;
+  return anchors;
+}
+
+function catmullRom1d(p0, p1, p2, p3, u) {
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return 0.5 * (
+    (2 * p1)
+    + (-p0 + p2) * u
+    + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2
+    + (-p0 + 3 * p1 - 3 * p2 + p3) * u3
+  );
+}
+
+function splineNormAt(currentMs, guideHz) {
+  const anchors = getSplineCursorAnchors(guideHz);
+  if (!anchors.length) return null;
+  let lo = 0;
+  let hi = anchors.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (anchors[mid].t <= currentMs) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  const prevPos = eventToCanvasPosition(prevEvt);
-  if (!prevPos) {
-    return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  if (best < 0) return { x: anchors[0].x, y: anchors[0].y };
+  if (best >= anchors.length - 1) {
+    const tail = anchors[anchors.length - 1];
+    return { x: tail.x, y: tail.y };
   }
-  return { inFrame: true, x: prevPos.x, y: prevPos.y };
+  const p1 = anchors[Math.max(0, best)];
+  const p2 = anchors[Math.min(anchors.length - 1, best + 1)];
+  const p0 = anchors[Math.max(0, best - 1)];
+  const p3 = anchors[Math.min(anchors.length - 1, best + 2)];
+  if (Number(p2.t) <= Number(p1.t)) return { x: p1.x, y: p1.y };
+  const p = Math.max(0, Math.min(1, (currentMs - Number(p1.t)) / (Number(p2.t) - Number(p1.t))));
+  return {
+    x: clamp01(catmullRom1d(p0.x, p1.x, p2.x, p3.x, p)),
+    y: clamp01(catmullRom1d(p0.y, p1.y, p2.y, p3.y, p)),
+  };
+}
+
+function resolveCursorPointerAt(currentMs, toPos, fromNorm, fallbackPointer) {
+  const mode = normalizeCursorMotionMode(project.cursorMotionMode);
+  const evts = project.events;
+  const hi = bisectEvents(currentMs);
+  const prevIdx = findPrevPointerEventIndex(evts, hi);
+  if (prevIdx < 0) return fallbackPointer();
+  const prevEvt = evts[prevIdx];
+  if (prevEvt.inFrame === false) return fallbackPointer();
+  const prevPos = toPos(prevEvt);
+  if (!prevPos) return fallbackPointer();
+  const pinnedClickPos = tryPinnedClickPosition(currentMs, prevIdx, evts, toPos);
+  if (pinnedClickPos) return pinnedClickPos;
+  if (mode === "raw") return { inFrame: true, x: prevPos.x, y: prevPos.y };
+
+  const nextIdx = findNextPointerEventIndex(evts, prevIdx + 1);
+  const nextEvt = nextIdx >= 0 ? evts[nextIdx] : null;
+  let linear = { inFrame: true, x: prevPos.x, y: prevPos.y };
+  if (
+    nextEvt
+    && nextEvt.inFrame !== false
+    && Number(nextEvt.t) > Number(prevEvt.t)
+  ) {
+    const nextPos = toPos(nextEvt);
+    if (nextPos) {
+      const p = Math.max(0, Math.min(1, (currentMs - Number(prevEvt.t || 0)) / (Number(nextEvt.t || 0) - Number(prevEvt.t || 0))));
+      linear = {
+        inFrame: true,
+        x: prevPos.x + (nextPos.x - prevPos.x) * p,
+        y: prevPos.y + (nextPos.y - prevPos.y) * p,
+      };
+    }
+  }
+  if (mode === "linear") return linear;
+  const norm = splineNormAt(currentMs, project.cursorSplineGuideHz);
+  if (!norm) return linear;
+  const pos = fromNorm(norm);
+  return pos ? { inFrame: true, x: pos.x, y: pos.y } : linear;
+}
+
+function pointerAt(currentMs) {
+  return resolveCursorPointerAt(
+    currentMs,
+    (evt) => eventToCanvasPosition(evt),
+    (norm) => {
+      const rect = videoContentRect();
+      const ox = Number(project.cursorOffsetX || 0);
+      const oy = Number(project.cursorOffsetY || 0);
+      return {
+        x: rect.x + norm.x * rect.width + ox,
+        y: rect.y + norm.y * rect.height + oy,
+      };
+    },
+    () => {
+      const rect = videoContentRect();
+      return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    }
+  );
 }
 
 /** Binary-search for the index of the last event with t <= ms. Returns -1 if none. */
@@ -1477,21 +1735,19 @@ function exportEventToPosition(evt, width, height) {
 }
 
 function pointerAtForExport(currentMs, width, height) {
-  const evts = project.events;
-  const hi = bisectEvents(currentMs);
-  let prevEvt = null;
-  for (let i = hi; i >= 0; i -= 1) {
-    const evt = evts[i];
-    if (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up") {
-      prevEvt = evt;
-      break;
-    }
-  }
-
-  if (!prevEvt || prevEvt.inFrame === false) return { inFrame: false, x: width / 2, y: height / 2 };
-  const prevPos = exportEventToPosition(prevEvt, width, height);
-  if (!prevPos) return { inFrame: false, x: width / 2, y: height / 2 };
-  return { inFrame: true, x: prevPos.x, y: prevPos.y };
+  return resolveCursorPointerAt(
+    currentMs,
+    (evt) => exportEventToPosition(evt, width, height),
+    (norm) => {
+      const ox = Number(project.cursorOffsetX || 0);
+      const oy = Number(project.cursorOffsetY || 0);
+      return {
+        x: norm.x * width + ox,
+        y: norm.y * height + oy,
+      };
+    },
+    () => ({ inFrame: false, x: width / 2, y: height / 2 })
+  );
 }
 
 function drawCursorOn(renderCtx, pointer) {
@@ -2658,6 +2914,10 @@ async function applyLoadedProjectData(data) {
   project.cursorOffsetY = Number(data.cursorOffsetY || 0);
   project.cursorHotspotX = Number(data.cursorHotspotX || 0);
   project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+  project.cursorMotionMode = normalizeCursorMotionMode(data.cursorMotionMode);
+  project.cursorSplineGuideHz = data.cursorSplineGuideHz != null
+    ? normalizeCursorSplineGuideHz(data.cursorSplineGuideHz)
+    : legacySmoothStrengthToGuideHz(data.cursorSmoothStrength);
   project.aspectPreset = normalizeAspectPreset(data.aspectPreset);
   project.trimStartSec = Number(data.trimStartSec || 0);
   project.trimEndSec = Number(data.trimEndSec || 0);
@@ -2667,6 +2927,10 @@ async function applyLoadedProjectData(data) {
   project.cursorTextureName = String(data.cursorTextureName || "");
   cursorOffsetXInput.value = String(project.cursorOffsetX);
   cursorOffsetYInput.value = String(project.cursorOffsetY);
+  if (cursorSplineGuideHzInput) {
+    cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
+  }
+  syncCursorMotionModeUi();
   syncAspectPresetUi();
   syncRenderSettingsUi();
   syncCursorHotspotInputs();
@@ -2754,6 +3018,8 @@ function serializeProjectState() {
     cursorTextureName: project.cursorTextureName || "",
     cursorHotspotX: Number(project.cursorHotspotX || 0),
     cursorHotspotY: Number(project.cursorHotspotY || 0),
+    cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
+    cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
@@ -2964,6 +3230,22 @@ cursorOffsetYInput.addEventListener("input", () => {
   persistCursorPrefsToLocalStorage();
   queueDraftProjectPersist();
 });
+if (cursorMotionModeSelect) {
+  cursorMotionModeSelect.addEventListener("change", () => {
+    project.cursorMotionMode = normalizeCursorMotionMode(cursorMotionModeSelect.value);
+    syncCursorMotionModeUi();
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  });
+}
+if (cursorSplineGuideHzInput) {
+  cursorSplineGuideHzInput.addEventListener("input", () => {
+    project.cursorSplineGuideHz = normalizeCursorSplineGuideHz(cursorSplineGuideHzInput.value);
+    cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  });
+}
 cursorHotspotXInput.addEventListener("input", () => {
   project.cursorHotspotX = Number(cursorHotspotXInput.value || 0);
   clampHotspotToImageBounds();
@@ -3497,6 +3779,7 @@ if (DEBUG_TEXT_FONT) {
 refreshActionButtons();
 syncAspectPresetUi();
 syncRenderSettingsUi();
+syncCursorMotionModeUi();
 updateSourceAspectOptionLabel(0, 0);
 syncPlaybackUi();
 renderCursorPreviewCanvas();

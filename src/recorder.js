@@ -16,6 +16,12 @@ function setSelectAreaButtonState(enabled) {
   selectAreaBtn.setAttribute("aria-label", label);
 }
 
+function setAreaEnabled(enabled) {
+  useSelectedArea = Boolean(enabled && selectedArea);
+  setSelectAreaButtonState(useSelectedArea);
+  syncAreaPreview();
+}
+
 function fitDockWindow() {
   if (fittedOnce) return;
   const rect = dockEl?.getBoundingClientRect();
@@ -56,7 +62,8 @@ function applyStoppedUiState() {
 
 function handleStopResult(result) {
   applyStoppedUiState();
-  syncAreaPreview();
+  // After each recording, disable area mode but keep last selected bounds so it can be re-enabled.
+  setAreaEnabled(false);
   if (!result?.ok) {
     const diag = shortDiag(result?.ffmpegDiagnostics);
     console.warn("Stop failed:", result?.reason || "Unknown error", diag);
@@ -118,25 +125,22 @@ async function toggleArea() {
   if (isRecording) return;
 
   if (useSelectedArea && selectedArea) {
-    useSelectedArea = false;
-    setSelectAreaButtonState(false);
-    syncAreaPreview();
+    // Disable selected-area mode but keep current bounds for quick re-enable.
+    setAreaEnabled(false);
     return;
   }
 
-  const bounds = await window.recorderApi.pickArea();
+  const bounds = await window.recorderApi.pickArea({
+    initialBounds: selectedArea || null,
+  });
   if (!bounds) {
-    selectedArea = null;
-    useSelectedArea = false;
-    setSelectAreaButtonState(false);
-    syncAreaPreview();
+    // User canceled picking: keep previously stored bounds (if any) and stay disabled.
+    setAreaEnabled(false);
     return;
   }
 
   selectedArea = bounds;
-  useSelectedArea = true;
-  setSelectAreaButtonState(true);
-  syncAreaPreview();
+  setAreaEnabled(true);
 }
 
 function onDockKeyDown(e) {
@@ -144,13 +148,11 @@ function onDockKeyDown(e) {
   if (isRecording) return;
   if (!useSelectedArea && !selectedArea) return;
   e.preventDefault();
-  selectedArea = null;
-  useSelectedArea = false;
-  setSelectAreaButtonState(false);
+  // Escape disables area mode without clearing remembered bounds.
+  setAreaEnabled(false);
   if (document.activeElement === selectAreaBtn) {
     selectAreaBtn.blur();
   }
-  syncAreaPreview();
 }
 
 selectAreaBtn.addEventListener("click", () => {
@@ -178,6 +180,5 @@ window.addEventListener("beforeunload", () => {
 
 loadSources().catch(() => {});
 applyStoppedUiState();
-setSelectAreaButtonState(false);
-syncAreaPreview();
+setAreaEnabled(false);
 window.addEventListener("load", () => setTimeout(fitDockWindow, 0));

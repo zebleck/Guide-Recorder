@@ -124,11 +124,36 @@ function dipRectToScreenRect(rect) {
   };
 }
 
-function openSelectorWindow() {
+function normalizeInitialSelectionRect(initialBounds, virtualBounds) {
+  if (!initialBounds || !virtualBounds) return null;
+  const x = Number(initialBounds.x);
+  const y = Number(initialBounds.y);
+  const width = Number(initialBounds.width);
+  const height = Number(initialBounds.height);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  if (width < 80 || height < 80) return null;
+  const maxX = Number(virtualBounds.width) - 80;
+  const maxY = Number(virtualBounds.height) - 80;
+  const localX = Math.max(0, Math.min(maxX, Math.round(x - Number(virtualBounds.x))));
+  const localY = Math.max(0, Math.min(maxY, Math.round(y - Number(virtualBounds.y))));
+  const clampedW = Math.max(80, Math.min(Number(virtualBounds.width) - localX, Math.round(width)));
+  const clampedH = Math.max(80, Math.min(Number(virtualBounds.height) - localY, Math.round(height)));
+  return {
+    x: localX,
+    y: localY,
+    width: clampedW,
+    height: clampedH,
+  };
+}
+
+function openSelectorWindow(initialBounds = null) {
   const v = virtualDesktopBounds();
   selectorState = {
     ...v,
     pendingResolve: null,
+    initialRect: normalizeInitialSelectionRect(initialBounds, v),
   };
 
   selectorWindow = new BrowserWindow({
@@ -1838,11 +1863,13 @@ ipcMain.handle("recorder:getState", async () => {
   return recordingStatePayload();
 });
 
-ipcMain.handle("recorder:pickArea", async () => {
+ipcMain.handle("recorder:pickArea", async (_evt, payload) => {
+  const initialBounds = payload?.initialBounds || null;
   if (selectorWindow) {
-    selectorWindow.focus();
+    selectorWindow.close();
+    openSelectorWindow(initialBounds);
   } else {
-    openSelectorWindow();
+    openSelectorWindow(initialBounds);
   }
 
   return await new Promise((resolve) => {
@@ -1929,6 +1956,7 @@ ipcMain.handle("selector:getContext", async () => {
     y: selectorState.y,
     width: selectorState.width,
     height: selectorState.height,
+    initialRect: selectorState.initialRect || null,
   };
 });
 

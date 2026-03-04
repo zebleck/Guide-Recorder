@@ -72,6 +72,18 @@
                 <label>Offset X (px)<input id="cursorOffsetX" type="number" step="1" value="0" /></label>
                 <label>Offset Y (px)<input id="cursorOffsetY" type="number" step="1" value="0" /></label>
               </div>
+              <label>
+                Cursor Motion
+                <select id="cursorMotionMode">
+                  <option value="raw">Raw (No Interpolation)</option>
+                  <option value="linear">Linear</option>
+                  <option value="spline">Spline (Click Anchored)</option>
+                </select>
+              </label>
+              <label>
+                Guide Points / Sec
+                <input id="cursorSplineGuideHz" type="range" min="2" max="60" step="1" value="18" />
+              </label>
               <div class="row">
                 <label class="file-input">
                   Cursor Texture

@@ -232,15 +232,24 @@ async function init() {
     return;
   }
 
-  // Start with a centered 60% area so user can adjust quickly.
-  const w = Math.round(window.innerWidth * 0.6);
-  const h = Math.round(window.innerHeight * 0.6);
-  state.rect = {
-    x: Math.round((window.innerWidth - w) / 2),
-    y: Math.round((window.innerHeight - h) / 2),
-    width: w,
-    height: h,
-  };
+  if (ctx.initialRect && Number.isFinite(Number(ctx.initialRect.width)) && Number.isFinite(Number(ctx.initialRect.height))) {
+    state.rect = {
+      x: Number(ctx.initialRect.x || 0),
+      y: Number(ctx.initialRect.y || 0),
+      width: Number(ctx.initialRect.width || 0),
+      height: Number(ctx.initialRect.height || 0),
+    };
+  } else {
+    // Start with a centered 60% area so user can adjust quickly.
+    const w = Math.round(window.innerWidth * 0.6);
+    const h = Math.round(window.innerHeight * 0.6);
+    state.rect = {
+      x: Math.round((window.innerWidth - w) / 2),
+      y: Math.round((window.innerHeight - h) / 2),
+      width: w,
+      height: h,
+    };
+  }
   drawRect();
 
   overlay.addEventListener("pointerdown", onPointerDown);

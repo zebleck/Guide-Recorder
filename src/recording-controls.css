@@ -4,6 +4,7 @@
   --text: #ecf1fb;
   --pause: #4d7bc6;
   --stop: #c2465a;
+  --cancel: #8b95a8;
 }
 
 * {
@@ -69,6 +70,10 @@ body {
   background: color-mix(in srgb, var(--stop) 64%, #1b2434);
 }
 
+.cancel {
+  background: color-mix(in srgb, var(--cancel) 64%, #1b2434);
+}
+
 .icon-btn:hover:not(:disabled) {
   border-color: rgba(171, 196, 239, 0.55);
 }
@@ -95,4 +100,31 @@ body {
   height: 12px;
   border-radius: 2px;
   background: currentColor;
+}
+
+.x {
+  width: 12px;
+  height: 12px;
+  position: relative;
+}
+
+.x::before,
+.x::after {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 14px;
+  background: currentColor;
+  border-radius: 1px;
+  left: 5px;
+  top: -1px;
+  transform-origin: center;
+}
+
+.x::before {
+  transform: rotate(45deg);
+}
+
+.x::after {
+  transform: rotate(-45deg);
 }

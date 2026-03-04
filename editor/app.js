@@ -2089,12 +2089,29 @@ async function exportFinalVideo() {
   }
 
   let exportVideo = null;
-  let exportStream = null;
-  let raf = 0;
+  let mezzanineId = "";
 
   try {
     exportVideo = document.createElement("video");
-    exportVideo.src = videoEl.currentSrc || videoEl.src;
+    let sourceUrl = videoEl.currentSrc || videoEl.src;
+    if (isDesktopAutoloadVideoSource()) {
+      setStatus("Preparing seek-optimized source for deterministic export...");
+      const mezzResp = await fetch("/__desktop/export/mezzanine/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({}),
+      });
+      if (!mezzResp.ok) {
+        throw new Error(`Could not build mezzanine source (${mezzResp.status})`);
+      }
+      const mezzJson = await mezzResp.json();
+      mezzanineId = String(mezzJson?.mezzanineId || "");
+      sourceUrl = String(mezzJson?.url || "");
+      if (!mezzanineId || !sourceUrl) {
+        throw new Error("Desktop did not return valid mezzanine source");
+      }
+    }
+    exportVideo.src = sourceUrl;
     exportVideo.playsInline = true;
     exportVideo.preload = "auto";
     exportVideo.volume = 0;
@@ -2114,12 +2131,11 @@ async function exportFinalVideo() {
     const trimStartSec = trimRange.startSec;
     const trimEndSec = trimRange.endSec;
     const targetDurationSec = trimRange.durationSec;
-    const targetDurationMs = targetDurationSec > 0 ? targetDurationSec * 1000 : 0;
 
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = width;
     exportCanvas.height = height;
-    const exportCtx = exportCanvas.getContext("2d");
+    const exportCtx = exportCanvas.getContext("2d", { willReadFrequently: true });
     const deterministic = await tryDesktopDeterministicFrameExport({
       exportVideo,
       exportCanvas,
@@ -2139,7 +2155,6 @@ async function exportFinalVideo() {
   } catch (err) {
     setStatus(`Export failed: ${err.message || String(err)}`);
   } finally {
-    cancelAnimationFrame(raf);
     if (exportVideo) {
       try {
         exportVideo.pause();
@@ -2149,8 +2164,12 @@ async function exportFinalVideo() {
         // ignore
       }
     }
-    if (exportStream) {
-      exportStream.getTracks().forEach((t) => t.stop());
+    if (mezzanineId) {
+      fetch("/__desktop/export/mezzanine/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ mezzanineId }),
+      }).catch(() => {});
     }
     exportFinalBtn.disabled = false;
   }
@@ -2276,12 +2295,13 @@ async function tryDesktopTranscodeMp4(sourceBlob, fps = 60) {
   }
 }
 
-function canvasToRgbaBuffer(renderCtx, width, height) {
-  const w = Math.max(1, Math.round(Number(width || 0)));
-  const h = Math.max(1, Math.round(Number(height || 0)));
-  const imageData = renderCtx.getImageData(0, 0, w, h);
-  // Slice to detach from the backing buffer and keep a tightly-sized payload.
-  return imageData.data.buffer.slice(0);
+function canvasToBlob(canvasEl, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvasEl.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Canvas encoding failed"));
+    }, type, quality);
+  });
 }
 
 function formatPerfMs(ms, divisor = 1) {
@@ -2294,6 +2314,17 @@ async function seekVideoForFrame(video, sec) {
   if (Math.abs(Number(video.currentTime || 0) - target) < 0.0005) return;
   video.currentTime = target;
   await waitForMediaEvent(video, "seeked");
+}
+
+function disposeVideoElement(video) {
+  if (!video) return;
+  try {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  } catch {
+    // ignore
+  }
 }
 
 async function tryDesktopDeterministicFrameExport({
@@ -2317,7 +2348,12 @@ async function tryDesktopDeterministicFrameExport({
   }
 
   let jobId = "";
+  let chunkVideo = null;
   try {
+    const sourceUrl = String(exportVideo.currentSrc || exportVideo.src || "");
+    if (!sourceUrl) {
+      return { blob: null, reason: "export video source is empty" };
+    }
     const perf = {
       totalStartMs: performance.now(),
       seekMs: 0,
@@ -2341,6 +2377,7 @@ async function tryDesktopDeterministicFrameExport({
         trimStartSec,
         trimEndSec,
         includeDesktopAudio: isDesktopAutoloadVideoSource(),
+        frameFormat: "jpeg",
       }),
     });
     if (!startResp.ok) return { blob: null, reason: `start endpoint failed (${startResp.status})` };
@@ -2351,48 +2388,77 @@ async function tryDesktopDeterministicFrameExport({
 
     exportVideo.pause();
 
-    const MAX_IN_FLIGHT = Math.max(
-      6,
-      Math.min(16, Number(window.navigator?.hardwareConcurrency || 8))
-    );
-    const inFlightUploads = [];
-    const fireUpload = (rgbaFrame, thisIndex) => {
+    const uploadFrame = async (framePayload, thisIndex) => {
       const uploadStart = performance.now();
-      const p = fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
+      const resp = await fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
         method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: rgbaFrame,
-      }).then((resp) => {
-        if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
-        perf.uploadHttpMs += Math.max(0, performance.now() - uploadStart);
-        perf.uploadCount += 1;
+        headers: { "Content-Type": "image/jpeg" },
+        body: framePayload,
       });
-      inFlightUploads.push(p);
+      if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
+      perf.uploadHttpMs += Math.max(0, performance.now() - uploadStart);
+      perf.uploadCount += 1;
     };
-    const drainUploads = async () => {
-      while (inFlightUploads.length > MAX_IN_FLIGHT) {
+    const MAX_IN_FLIGHT = 2;
+    const inFlightUploads = new Set();
+    let uploadError = null;
+    const waitForFreeUploadSlot = async () => {
+      while (inFlightUploads.size >= MAX_IN_FLIGHT) {
         const waitStart = performance.now();
-        await inFlightUploads.shift();
+        await Promise.race(inFlightUploads);
         perf.uploadWaitMs += Math.max(0, performance.now() - waitStart);
       }
+      if (uploadError) throw uploadError;
+    };
+
+    const createChunkVideoAt = async (sec) => {
+      const v = document.createElement("video");
+      v.src = sourceUrl;
+      v.playsInline = true;
+      v.preload = "auto";
+      v.volume = 0;
+      if (v.readyState < 1) {
+        await waitForMediaEvent(v, "loadedmetadata");
+      }
+      await seekVideoForFrame(v, sec);
+      return v;
     };
 
     setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
+    const CHUNK_FRAMES = 120;
+    let currentVideo = exportVideo;
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
       const targetSec = trimStartSec + (frameIndex / fps);
+      if (frameIndex > 0 && frameIndex % CHUNK_FRAMES === 0) {
+        const rebuildStart = performance.now();
+        const nextVideo = await createChunkVideoAt(targetSec);
+        if (currentVideo !== exportVideo) {
+          disposeVideoElement(currentVideo);
+        }
+        currentVideo = nextVideo;
+        chunkVideo = nextVideo;
+        perf.seekMs += Math.max(0, performance.now() - rebuildStart);
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
       const seekStart = performance.now();
-      await seekVideoForFrame(exportVideo, targetSec);
+      await seekVideoForFrame(currentVideo, targetSec);
       perf.seekMs += Math.max(0, performance.now() - seekStart);
 
       const renderMs = targetSec * 1000;
       const drawStart = performance.now();
-      renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
+      renderExportFrame(exportCtx, currentVideo, renderMs, width, height);
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
-      const rgbaFrame = canvasToRgbaBuffer(exportCtx, width, height);
+      const jpegFrame = await canvasToBlob(exportCanvas, "image/jpeg", 0.9);
       perf.encodeMs += Math.max(0, performance.now() - encodeStart);
-      fireUpload(rgbaFrame, frameIndex);
-      await drainUploads();
+      await waitForFreeUploadSlot();
+      const trackedUpload = uploadFrame(jpegFrame, frameIndex).catch((err) => {
+        uploadError = err;
+        throw err;
+      }).finally(() => {
+        inFlightUploads.delete(trackedUpload);
+      });
+      inFlightUploads.add(trackedUpload);
 
       const done = frameIndex + 1;
       if (done === 1 || done % 15 === 0 || done >= totalFrames) {
@@ -2415,14 +2481,21 @@ async function tryDesktopDeterministicFrameExport({
           `upload_wait_ms=${formatPerfMs(perf.uploadWaitMs)}`
         );
       }
-      if (done % 8 === 0) {
-        await new Promise((resolve) => window.setTimeout(resolve, 0));
-      }
+      // Yield every frame so GC can reclaim readback buffers under high pressure.
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
-    exportVideo.pause();
-    const drainAllStart = performance.now();
-    await Promise.all(inFlightUploads);
-    perf.uploadWaitMs += Math.max(0, performance.now() - drainAllStart);
+    if (inFlightUploads.size > 0) {
+      const waitStart = performance.now();
+      await Promise.all(Array.from(inFlightUploads));
+      perf.uploadWaitMs += Math.max(0, performance.now() - waitStart);
+    }
+    if (uploadError) throw uploadError;
+    if (currentVideo !== exportVideo) {
+      disposeVideoElement(currentVideo);
+      chunkVideo = null;
+    } else {
+      exportVideo.pause();
+    }
 
     const finalizeStart = performance.now();
     const finalizeResp = await fetch("/__desktop/export/frames/finalize", {
@@ -2459,6 +2532,10 @@ async function tryDesktopDeterministicFrameExport({
   } catch (err) {
     return { blob: null, reason: err?.message || "exception in deterministic export" };
   } finally {
+    if (chunkVideo) {
+      disposeVideoElement(chunkVideo);
+      chunkVideo = null;
+    }
     if (jobId) {
       fetch("/__desktop/export/frames/abort", {
         method: "POST",

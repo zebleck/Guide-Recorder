@@ -1,5 +1,6 @@
 const pauseBtn = document.getElementById("pauseBtn");
 const stopBtn = document.getElementById("stopBtn");
+const cancelBtn = document.getElementById("cancelBtn");
 const timeLabel = document.getElementById("timeLabel");
 
 let isPaused = false;
@@ -24,6 +25,7 @@ function applyState(state) {
   pauseBtn.setAttribute("aria-label", pauseBtn.title);
   pauseBtn.disabled = !isRecording;
   stopBtn.disabled = !isRecording;
+  cancelBtn.disabled = !isRecording;
   timeLabel.textContent = formatClock(elapsedMs);
 }
 
@@ -46,8 +48,21 @@ stopBtn.addEventListener("click", async () => {
   if (!isRecording) return;
   stopBtn.disabled = true;
   pauseBtn.disabled = true;
+  cancelBtn.disabled = true;
   try {
     await window.recordingControlsApi.stopRecording();
+  } catch {
+    // ignore
+  }
+});
+
+cancelBtn.addEventListener("click", async () => {
+  if (!isRecording) return;
+  cancelBtn.disabled = true;
+  stopBtn.disabled = true;
+  pauseBtn.disabled = true;
+  try {
+    await window.recordingControlsApi.cancelRecording();
   } catch {
     // ignore
   }

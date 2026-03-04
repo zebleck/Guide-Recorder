@@ -26,6 +26,7 @@ let latestSaved = {
   jsonPath: "",
 };
 const frameExportJobs = new Map();
+const mezzanineJobs = new Map();
 
 const editorRoot = path.resolve(__dirname, "..", "editor");
 const appLogoPath = path.resolve(__dirname, "..", "logo.svg");
@@ -645,20 +646,28 @@ async function ensureEditorServer() {
           const trimStartSec = Math.max(0, Number(body?.trimStartSec || 0));
           const trimEndRaw = Number(body?.trimEndSec || 0);
           const trimEndSec = trimEndRaw > trimStartSec ? trimEndRaw : 0;
+          const frameFormat = String(body?.frameFormat || "raw").toLowerCase() === "jpeg" ? "jpeg" : "raw";
           const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-frame-export-"));
           const includeDesktopAudio = Boolean(body?.includeDesktopAudio && latestSaved.videoPath);
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
           const outputPath = path.join(tmpDir, "final.mp4");
-          const args = [
-            "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-video_size", `${frameWidth}x${frameHeight}`,
-            "-framerate",
-            String(fps),
-            "-i",
-            "pipe:0",
-          ];
+          const args = ["-y"];
+          if (frameFormat === "jpeg") {
+            args.push(
+              "-f", "image2pipe",
+              "-vcodec", "mjpeg",
+              "-framerate", String(fps),
+              "-i", "pipe:0"
+            );
+          } else {
+            args.push(
+              "-f", "rawvideo",
+              "-pix_fmt", "rgba",
+              "-video_size", `${frameWidth}x${frameHeight}`,
+              "-framerate", String(fps),
+              "-i", "pipe:0"
+            );
+          }
           if (includeDesktopAudio) {
             if (trimStartSec > 0) args.push("-ss", trimStartSec.toFixed(3));
             args.push("-i", latestSaved.videoPath);
@@ -698,6 +707,9 @@ async function ensureEditorServer() {
               else reject(new Error(`ffmpeg frame-export failed (code=${code}, signal=${signal || "none"}): ${ffmpegStderr}`));
             });
           });
+          donePromise.catch(() => {
+            // consumed during finalize/abort; avoid unhandled rejection noise
+          });
           frameExportJobs.set(jobId, {
             jobId,
             tmpDir,
@@ -715,7 +727,10 @@ async function ensureEditorServer() {
             queuedBytes: 0,
             frameWidth,
             frameHeight,
-            frameMaxBytes: Math.max(1024, frameWidth * frameHeight * 4 + 4096),
+            frameFormat,
+            frameMaxBytes: frameFormat === "jpeg"
+              ? 16 * 1024 * 1024
+              : Math.max(1024, frameWidth * frameHeight * 4 + 4096),
           });
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ ok: true, jobId }));
@@ -741,17 +756,20 @@ async function ensureEditorServer() {
             res.end(JSON.stringify({ ok: false, error: "Frame export job already finalized" }));
             return;
           }
-          const frameBuffer = await readRequestBodyBuffer(req, Math.max(8 * 1024 * 1024, Number(job.frameMaxBytes || 0)));
-          const expectedBytes = Math.max(1, Number(job.frameWidth || 1) * Number(job.frameHeight || 1) * 4);
-          if (frameBuffer.length !== expectedBytes) {
-            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({
-              ok: false,
-              error: `Invalid frame byte length (${frameBuffer.length}, expected ${expectedBytes})`,
-            }));
-            return;
+          if (String(job.frameFormat || "raw") === "jpeg") {
+            const frameBuffer = await readRequestBodyBuffer(req, Math.max(8 * 1024 * 1024, Number(job.frameMaxBytes || 0)));
+            enqueueFrameBufferToJob(job, frameBuffer);
+          } else {
+            const expectedBytes = Math.max(1, Number(job.frameWidth || 1) * Number(job.frameHeight || 1) * 4);
+            const maxBody = Math.max(8 * 1024 * 1024, Number(job.frameMaxBytes || 0));
+            const contentLen = Number(req.headers["content-length"] || 0);
+            if (contentLen > maxBody) {
+              res.writeHead(413, { "Content-Type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ ok: false, error: "Frame payload too large" }));
+              return;
+            }
+            await enqueueFrameRequestStreamToJob(job, req, expectedBytes);
           }
-          enqueueFrameBufferToJob(job, frameBuffer);
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ ok: true, index }));
         } catch (err) {
@@ -891,6 +909,153 @@ async function ensureEditorServer() {
           "Cache-Control": "no-store",
         });
         fsNative.createReadStream(latestSaved.videoPath).pipe(res);
+        return;
+      }
+
+      if (pathname === "/__desktop/export/mezzanine/start" && req.method === "POST") {
+        let tmpDir = "";
+        try {
+          if (!latestSaved.videoPath) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "No source recording available" }));
+            return;
+          }
+          await verifyFfmpegAvailable();
+          const probedFps = await probeVideoFps(latestSaved.videoPath).catch(() => 60);
+          const targetFps = Math.max(1, Math.min(240, Number(probedFps || 60)));
+          tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-mezzanine-"));
+          const outputPath = path.join(tmpDir, "mezzanine.mp4");
+          const args = [
+            "-y",
+            "-i",
+            latestSaved.videoPath,
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "14",
+            "-g",
+            "1",
+            "-keyint_min",
+            "1",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            String(targetFps),
+            "-vsync",
+            "cfr",
+            "-movflags",
+            "+faststart",
+            "-an",
+            outputPath,
+          ];
+          await new Promise((resolve, reject) => {
+            const proc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+            let stderr = "";
+            proc.stderr.on("data", (d) => {
+              stderr = (stderr + String(d || "")).slice(-12000);
+            });
+            proc.once("error", reject);
+            proc.once("exit", (code) => {
+              if (code === 0) resolve();
+              else reject(new Error(`ffmpeg mezzanine failed (code=${code}): ${stderr}`));
+            });
+          });
+          const mezzanineId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+          mezzanineJobs.set(mezzanineId, {
+            mezzanineId,
+            tmpDir,
+            outputPath,
+            fps: targetFps,
+            createdAt: Date.now(),
+          });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({
+            ok: true,
+            mezzanineId,
+            fps: targetFps,
+            url: `/__desktop/export/mezzanine/video?mezzanineId=${encodeURIComponent(mezzanineId)}&t=${Date.now()}`,
+          }));
+        } catch (err) {
+          if (tmpDir) await safeRemoveDir(tmpDir);
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not create mezzanine source" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/mezzanine/video") {
+        const mezzanineId = String(requestUrl.searchParams.get("mezzanineId") || "");
+        const job = mezzanineJobs.get(mezzanineId);
+        if (!job) {
+          res.writeHead(404, { "Cache-Control": "no-store" });
+          res.end("Mezzanine source not found");
+          return;
+        }
+        const stat = await fs.stat(job.outputPath);
+        const total = Number(stat.size || 0);
+        const contentType = "video/mp4";
+        const range = req.headers.range;
+        if (range) {
+          const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+          if (m) {
+            let start = null;
+            let end = null;
+            const startRaw = m[1];
+            const endRaw = m[2];
+            if (startRaw !== "") start = Number(startRaw);
+            if (endRaw !== "") end = Number(endRaw);
+            if (start == null && end != null) {
+              const suffixLen = Math.max(0, end);
+              start = Math.max(0, total - suffixLen);
+              end = total - 1;
+            } else {
+              if (start == null) start = 0;
+              if (end == null || end >= total) end = total - 1;
+            }
+            if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && start <= end && start < total) {
+              res.writeHead(206, {
+                "Content-Type": contentType,
+                "Accept-Ranges": "bytes",
+                "Content-Range": `bytes ${start}-${end}/${total}`,
+                "Content-Length": String(end - start + 1),
+                "Cache-Control": "no-store",
+              });
+              fsNative.createReadStream(job.outputPath, { start, end }).pipe(res);
+              return;
+            }
+          }
+        }
+        res.writeHead(200, {
+          "Content-Type": contentType,
+          "Content-Length": String(total),
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "no-store",
+        });
+        fsNative.createReadStream(job.outputPath).pipe(res);
+        return;
+      }
+
+      if (pathname === "/__desktop/export/mezzanine/abort" && req.method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const mezzanineId = String(body?.mezzanineId || "");
+          const job = mezzanineJobs.get(mezzanineId);
+          if (job) {
+            mezzanineJobs.delete(mezzanineId);
+            await safeRemoveDir(job.tmpDir);
+          }
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not abort mezzanine source" }));
+        }
         return;
       }
       if (pathname === "/__desktop/source/fps") {
@@ -1069,6 +1234,69 @@ function enqueueFrameBufferToJob(job, buffer) {
   job.writeChain.catch(() => {
     // propagated during finalize via await job.writeChain
   });
+}
+
+function enqueueFrameRequestStreamToJob(job, req, expectedBytes) {
+  if (!job?.ffmpegProc?.stdin || !req) return Promise.reject(new Error("Invalid frame export job stream"));
+  const expected = Math.max(1, Number(expectedBytes || 0));
+  job.writeChain = job.writeChain.then(
+    () =>
+      new Promise((resolve, reject) => {
+        if (job.finalized) {
+          reject(new Error("Frame export job already finalized"));
+          return;
+        }
+        const stdin = job.ffmpegProc.stdin;
+        let total = 0;
+        let done = false;
+        const finish = (err) => {
+          if (done) return;
+          done = true;
+          req.off("data", onData);
+          req.off("end", onEnd);
+          req.off("error", onReqErr);
+          stdin.off("error", onStdinErr);
+          if (err) reject(err);
+          else resolve();
+        };
+        const onStdinErr = (err) => finish(err);
+        const onReqErr = (err) => finish(err);
+        const onData = (chunk) => {
+          if (done) return;
+          total += chunk.length;
+          if (total > expected) {
+            finish(new Error(`Frame payload too large (${total} > ${expected})`));
+            return;
+          }
+          job.queuedBytes = Number(job.queuedBytes || 0) + chunk.length;
+          const ok = stdin.write(chunk, (err) => {
+            job.queuedBytes = Math.max(0, Number(job.queuedBytes || 0) - chunk.length);
+            if (err) finish(err);
+          });
+          if (!ok) {
+            req.pause();
+            stdin.once("drain", () => {
+              if (!done) req.resume();
+            });
+          }
+        };
+        const onEnd = () => {
+          if (total !== expected) {
+            finish(new Error(`Invalid frame byte length (${total}, expected ${expected})`));
+            return;
+          }
+          finish();
+        };
+        req.on("data", onData);
+        req.once("end", onEnd);
+        req.once("error", onReqErr);
+        stdin.once("error", onStdinErr);
+      })
+  );
+  job.writeChain.catch(() => {
+    // propagated during finalize via await job.writeChain
+  });
+  return job.writeChain;
 }
 
 async function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
@@ -1953,6 +2181,58 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
 
 ipcMain.handle("recorder:stopRecording", async () => {
   return await stopRecordingInternal();
+});
+
+async function cancelRecordingInternal() {
+  if (!activeSession || !activeSession.ffmpegProcess) {
+    closeRecordingControlsWindow();
+    stopRecordingStateTicker();
+    notifyRecordingState();
+    const result = { ok: false, reason: "No active recording", cancelled: true };
+    notifyRecordingStopped(result);
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    return result;
+  }
+
+  const session = activeSession;
+  const videoPath = session.videoPath;
+  const jsonPath = session.jsonPath;
+  closeRecordingControlsWindow();
+  closeCountdownWindow();
+  stopCursorSampler();
+  stopUiohook();
+  globalShortcut.unregister(STOP_HOTKEY);
+
+  await stopFfmpegProcess(session.ffmpegProcess);
+  activeSession = null;
+  stopRecordingStateTicker();
+  notifyRecordingState();
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+
+  try {
+    await fs.unlink(videoPath);
+  } catch {
+    // ignore if file doesn't exist or already deleted
+  }
+  try {
+    await fs.unlink(jsonPath);
+  } catch {
+    // ignore
+  }
+
+  const result = { ok: false, reason: "Cancelled", cancelled: true };
+  notifyRecordingStopped(result);
+  return result;
+}
+
+ipcMain.handle("recorder:cancelRecording", async () => {
+  return await cancelRecordingInternal();
 });
 
 app.whenReady().then(async () => {

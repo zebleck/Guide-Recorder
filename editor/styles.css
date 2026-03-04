@@ -286,6 +286,7 @@ body::after {
 .controls .row-toolbar > button,
 .controls .row-toolbar > .file-input,
 .controls .row-toolbar > .cursor-btn-wrap,
+.controls .row-toolbar > .render-btn-wrap,
 .controls .row-toolbar > .aspect-select {
   flex-shrink: 0;
 }
@@ -423,6 +424,10 @@ button:disabled {
   position: relative;
 }
 
+.render-btn-wrap {
+  position: relative;
+}
+
 /* ============================================
    Cursor popover
    ============================================ */
@@ -442,6 +447,10 @@ button:disabled {
     0 0 0 1px rgba(255, 255, 255, 0.03);
   z-index: 100;
   animation: popoverIn 0.25s var(--ease-out-expo) both;
+}
+
+.render-popover {
+  width: 340px;
 }
 
 @keyframes popoverIn {
@@ -475,6 +484,13 @@ button:disabled {
   border-radius: 12px;
   background: var(--bg-input);
   cursor: crosshair;
+}
+
+.settings-note {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
 }
 
 .grid2 {

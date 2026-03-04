@@ -24,6 +24,9 @@ const effectEditorDuplicateBtn = document.getElementById("effectEditorDuplicateB
 const cursorSettingsBtn = document.getElementById("cursorSettingsBtn");
 const cursorPopover = document.getElementById("cursorPopover");
 const cursorPopoverCloseBtn = document.getElementById("cursorPopoverCloseBtn");
+const renderSettingsBtn = document.getElementById("renderSettingsBtn");
+const renderSettingsPopover = document.getElementById("renderSettingsPopover");
+const renderSettingsCloseBtn = document.getElementById("renderSettingsCloseBtn");
 const aspectPresetSelect = document.getElementById("aspectPresetSelect");
 
 const videoEl = document.getElementById("previewVideo");
@@ -44,6 +47,9 @@ const cursorHotspotXInput = document.getElementById("cursorHotspotX");
 const cursorHotspotYInput = document.getElementById("cursorHotspotY");
 const cursorPreviewCanvas = document.getElementById("cursorPreviewCanvas");
 const cursorPreviewCtx = cursorPreviewCanvas.getContext("2d");
+const renderTransportSelect = document.getElementById("renderTransportSelect");
+const renderFpsModeSelect = document.getElementById("renderFpsModeSelect");
+const renderFpsValueInput = document.getElementById("renderFpsValueInput");
 const TIMELINE_LABEL_COL_PX = 64;
 
 let importedVideoUrl = "";
@@ -131,6 +137,9 @@ const project = {
   aspectPreset: "source",
   trimStartSec: 0,
   trimEndSec: 0,
+  renderFrameTransport: "png",
+  renderFpsMode: "source",
+  renderFpsValue: 60,
 };
 
 function setStatus(msg) {
@@ -450,6 +459,40 @@ function toggleCursorPopover(show) {
   if (!cursorPopover) return;
   if (show) cursorPopover.classList.remove("hidden");
   else cursorPopover.classList.add("hidden");
+}
+
+function toggleRenderSettingsPopover(show) {
+  if (!renderSettingsPopover) return;
+  if (show) renderSettingsPopover.classList.remove("hidden");
+  else renderSettingsPopover.classList.add("hidden");
+}
+
+function normalizeRenderFrameTransport(value) {
+  const raw = String(value || "png").toLowerCase();
+  return raw === "jpeg" ? "jpeg" : "png";
+}
+
+function normalizeRenderFpsMode(value) {
+  return String(value || "source") === "custom" ? "custom" : "source";
+}
+
+function normalizeRenderFpsValue(value) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 60;
+  return Math.max(1, Math.min(240, raw));
+}
+
+function syncRenderSettingsUi() {
+  if (renderTransportSelect) {
+    renderTransportSelect.value = normalizeRenderFrameTransport(project.renderFrameTransport);
+  }
+  if (renderFpsModeSelect) {
+    renderFpsModeSelect.value = normalizeRenderFpsMode(project.renderFpsMode);
+  }
+  if (renderFpsValueInput) {
+    renderFpsValueInput.value = String(normalizeRenderFpsValue(project.renderFpsValue));
+    renderFpsValueInput.disabled = normalizeRenderFpsMode(project.renderFpsMode) !== "custom";
+  }
 }
 
 function clampEffectBounds(effect) {
@@ -2338,7 +2381,13 @@ async function tryDesktopDeterministicFrameExport({
   targetDurationSec,
 }) {
   if (!(targetDurationSec > 0)) return { blob: null, reason: "target duration is 0s" };
-  const fps = await preferredDeterministicFps(exportVideo);
+  const fpsMode = normalizeRenderFpsMode(project.renderFpsMode);
+  const frameFormat = normalizeRenderFrameTransport(project.renderFrameTransport);
+  const fps = fpsMode === "custom"
+    ? normalizeRenderFpsValue(project.renderFpsValue)
+    : await preferredDeterministicFps(exportVideo);
+  const frameMimeType = frameFormat === "jpeg" ? "image/jpeg" : "image/png";
+  const frameEncodeQuality = frameFormat === "jpeg" ? 0.95 : undefined;
   const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
     return {
@@ -2365,7 +2414,16 @@ async function tryDesktopDeterministicFrameExport({
       startReqMs: 0,
       finalizeReqMs: 0,
     };
-    setStatus(`Starting deterministic export (${fps}fps)...`);
+    setStatus(`Starting deterministic export (${fps.toFixed(3)}fps, ${frameFormat.toUpperCase()})...`);
+    console.log(
+      "[export-config]",
+      `fps=${fps.toFixed(6)}`,
+      `transport=${frameFormat}`,
+      `trim_start=${trimStartSec.toFixed(6)}`,
+      `trim_end=${trimEndSec.toFixed(6)}`,
+      `duration=${targetDurationSec.toFixed(6)}`,
+      `total_frames=${totalFrames}`
+    );
     const startReqStart = performance.now();
     const startResp = await fetch("/__desktop/export/frames/start", {
       method: "POST",
@@ -2377,7 +2435,7 @@ async function tryDesktopDeterministicFrameExport({
         trimStartSec,
         trimEndSec,
         includeDesktopAudio: isDesktopAutoloadVideoSource(),
-        frameFormat: "png",
+        frameFormat,
       }),
     });
     if (!startResp.ok) return { blob: null, reason: `start endpoint failed (${startResp.status})` };
@@ -2392,7 +2450,7 @@ async function tryDesktopDeterministicFrameExport({
       const uploadStart = performance.now();
       const resp = await fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
         method: "POST",
-        headers: { "Content-Type": "image/png" },
+        headers: { "Content-Type": frameMimeType },
         body: framePayload,
       });
       if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
@@ -2449,10 +2507,10 @@ async function tryDesktopDeterministicFrameExport({
       renderExportFrame(exportCtx, currentVideo, renderMs, width, height);
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
-      const pngFrame = await canvasToBlob(exportCanvas, "image/png");
+      const encodedFrame = await canvasToBlob(exportCanvas, frameMimeType, frameEncodeQuality);
       perf.encodeMs += Math.max(0, performance.now() - encodeStart);
       await waitForFreeUploadSlot();
-      const trackedUpload = uploadFrame(pngFrame, frameIndex).catch((err) => {
+      const trackedUpload = uploadFrame(encodedFrame, frameIndex).catch((err) => {
         uploadError = err;
         throw err;
       }).finally(() => {
@@ -2609,10 +2667,14 @@ async function applyLoadedProjectData(data) {
   project.aspectPreset = normalizeAspectPreset(data.aspectPreset);
   project.trimStartSec = Number(data.trimStartSec || 0);
   project.trimEndSec = Number(data.trimEndSec || 0);
+  project.renderFrameTransport = normalizeRenderFrameTransport(data.renderFrameTransport);
+  project.renderFpsMode = normalizeRenderFpsMode(data.renderFpsMode);
+  project.renderFpsValue = normalizeRenderFpsValue(data.renderFpsValue);
   project.cursorTextureName = String(data.cursorTextureName || "");
   cursorOffsetXInput.value = String(project.cursorOffsetX);
   cursorOffsetYInput.value = String(project.cursorOffsetY);
   syncAspectPresetUi();
+  syncRenderSettingsUi();
   syncCursorHotspotInputs();
   await loadCursorTextureFromDataUrl(
     String(data.cursorTextureDataUrl || ""),
@@ -2701,6 +2763,9 @@ function serializeProjectState() {
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
+    renderFrameTransport: normalizeRenderFrameTransport(project.renderFrameTransport),
+    renderFpsMode: normalizeRenderFpsMode(project.renderFpsMode),
+    renderFpsValue: normalizeRenderFpsValue(project.renderFpsValue),
   };
 }
 
@@ -2869,6 +2934,27 @@ if (aspectPresetSelect) {
       if (videoEl.paused) renderOverlay();
       else startRenderLoop();
     }
+    queueDraftProjectPersist();
+  });
+}
+if (renderTransportSelect) {
+  renderTransportSelect.addEventListener("change", () => {
+    project.renderFrameTransport = normalizeRenderFrameTransport(renderTransportSelect.value);
+    syncRenderSettingsUi();
+    queueDraftProjectPersist();
+  });
+}
+if (renderFpsModeSelect) {
+  renderFpsModeSelect.addEventListener("change", () => {
+    project.renderFpsMode = normalizeRenderFpsMode(renderFpsModeSelect.value);
+    syncRenderSettingsUi();
+    queueDraftProjectPersist();
+  });
+}
+if (renderFpsValueInput) {
+  renderFpsValueInput.addEventListener("input", () => {
+    project.renderFpsValue = normalizeRenderFpsValue(renderFpsValueInput.value);
+    syncRenderSettingsUi();
     queueDraftProjectPersist();
   });
 }
@@ -3338,12 +3424,25 @@ effectEditorDuplicateBtn.addEventListener("click", () => {
 if (cursorSettingsBtn) {
   cursorSettingsBtn.addEventListener("click", () => {
     const shouldShow = cursorPopover?.classList.contains("hidden");
+    if (shouldShow) toggleRenderSettingsPopover(false);
     toggleCursorPopover(Boolean(shouldShow));
   });
 }
 if (cursorPopoverCloseBtn) {
   cursorPopoverCloseBtn.addEventListener("click", () => {
     toggleCursorPopover(false);
+  });
+}
+if (renderSettingsBtn) {
+  renderSettingsBtn.addEventListener("click", () => {
+    const shouldShow = renderSettingsPopover?.classList.contains("hidden");
+    if (shouldShow) toggleCursorPopover(false);
+    toggleRenderSettingsPopover(Boolean(shouldShow));
+  });
+}
+if (renderSettingsCloseBtn) {
+  renderSettingsCloseBtn.addEventListener("click", () => {
+    toggleRenderSettingsPopover(false);
   });
 }
 
@@ -3353,6 +3452,11 @@ window.addEventListener("pointerdown", (e) => {
   if (cursorPopover && !cursorPopover.classList.contains("hidden")) {
     if (!cursorPopover.contains(target) && !cursorSettingsBtn?.contains(target)) {
       toggleCursorPopover(false);
+    }
+  }
+  if (renderSettingsPopover && !renderSettingsPopover.classList.contains("hidden")) {
+    if (!renderSettingsPopover.contains(target) && !renderSettingsBtn?.contains(target)) {
+      toggleRenderSettingsPopover(false);
     }
   }
   if (effectEditor && !effectEditor.classList.contains("hidden")) {
@@ -3398,6 +3502,7 @@ if (DEBUG_TEXT_FONT) {
 }
 refreshActionButtons();
 syncAspectPresetUi();
+syncRenderSettingsUi();
 updateSourceAspectOptionLabel(0, 0);
 syncPlaybackUi();
 renderCursorPreviewCanvas();

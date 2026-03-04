@@ -417,10 +417,23 @@ function cursorSnapshotForSession(session, pointOverride = null) {
   return { x: point.x, y: point.y, ...norm };
 }
 
-function mapDisplayFromSource(sourceId) {
+function mapDisplayFromSource(sourceId, explicitDisplayId = "") {
+  const directId = Number(explicitDisplayId);
+  if (Number.isFinite(directId) && directId > 0) {
+    const direct = screen.getAllDisplays().find((d) => d.id === directId);
+    if (direct) return direct;
+  }
   const sourceDisplayId = Number(String(sourceId || "").split(":")[1]);
   if (!Number.isFinite(sourceDisplayId)) return screen.getPrimaryDisplay();
   return screen.getAllDisplays().find((d) => d.id === sourceDisplayId) || screen.getPrimaryDisplay();
+}
+
+function preferredCaptureFpsForDisplay(display) {
+  const raw = Number(display?.displayFrequency || display?.refreshRate || 0);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.max(12, Math.min(240, Math.round(raw)));
+  }
+  return 30;
 }
 
 function pushSessionEvent(evt) {
@@ -590,7 +603,7 @@ async function ensureEditorServer() {
         try {
           const requestedFpsRaw = Number(req.headers["x-export-fps"] || 0);
           const requestedFps = Number.isFinite(requestedFpsRaw) && requestedFpsRaw > 0
-            ? Math.max(12, Math.min(120, requestedFpsRaw))
+            ? Math.max(1, Math.min(240, requestedFpsRaw))
             : 0;
           await writeRequestBodyToFile(req, inputPath);
           await transcodeWebmToMp4(inputPath, outputPath, requestedFps);
@@ -619,7 +632,11 @@ async function ensureEditorServer() {
         try {
           await verifyFfmpegAvailable();
           const body = await readJsonBody(req);
-          const fps = Math.max(12, Math.min(120, Math.round(Number(body?.fps || 60))));
+          const fpsRaw = Number(body?.fps || 0);
+          if (!Number.isFinite(fpsRaw) || fpsRaw <= 0) {
+            throw new Error("Invalid deterministic export FPS");
+          }
+          const fps = Math.max(1, Math.min(240, fpsRaw));
           const frameWidth = Math.max(2, Math.round(Number(body?.width || 0)));
           const frameHeight = Math.max(2, Math.round(Number(body?.height || 0)));
           if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight) || frameWidth < 2 || frameHeight < 2) {
@@ -649,6 +666,7 @@ async function ensureEditorServer() {
           } else {
             args.push("-map", "0:v:0");
           }
+          args.push("-r", String(fps), "-vsync", "cfr");
           args.push(
             "-c:v",
             "libx264",
@@ -875,6 +893,22 @@ async function ensureEditorServer() {
         fsNative.createReadStream(latestSaved.videoPath).pipe(res);
         return;
       }
+      if (pathname === "/__desktop/source/fps") {
+        if (!latestSaved.videoPath) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "No recording available" }));
+          return;
+        }
+        try {
+          const fps = await probeVideoFps(latestSaved.videoPath);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ ok: true, fps }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: err?.message || "Could not probe source fps" }));
+        }
+        return;
+      }
       if (pathname === "/__desktop/latest.json") {
         if (!latestSaved.jsonPath) {
           res.writeHead(404);
@@ -1066,7 +1100,7 @@ async function transcodeWebmToMp4(inputPath, outputPath, requestedFps = 0) {
       targetFps = 60;
     }
   }
-  targetFps = Math.max(12, Math.min(120, Math.round(targetFps)));
+  targetFps = Math.max(1, Math.min(240, Number(targetFps)));
   await new Promise((resolve, reject) => {
     const args = [
       "-y",
@@ -1274,7 +1308,8 @@ async function verifyFfmpegAvailable() {
   });
 }
 
-function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
+function ffmpegArgsFor(bounds, outputPath, hideNativeCursor, captureFps = 30) {
+  const normalizedFps = String(Math.max(12, Math.min(240, Math.round(Number(captureFps || 30)))));
   const px = dipRectToScreenRect(bounds);
   const safeX = Math.max(0, Number(px.x || 0));
   const safeY = Math.max(0, Number(px.y || 0));
@@ -1286,7 +1321,7 @@ function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
     "-f",
     "gdigrab",
     "-framerate",
-    "30",
+    normalizedFps,
     "-offset_x",
     String(safeX),
     "-offset_y",
@@ -1297,6 +1332,10 @@ function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
     hideNativeCursor ? "0" : "1",
     "-i",
     "desktop",
+    "-r",
+    normalizedFps,
+    "-vsync",
+    "cfr",
     "-c:v",
     "libx264",
     "-preset",
@@ -1311,7 +1350,8 @@ function ffmpegArgsFor(bounds, outputPath, hideNativeCursor) {
   ];
 }
 
-function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
+function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor, captureFps = 30) {
+  const normalizedFps = String(Math.max(12, Math.min(240, Math.round(Number(captureFps || 30)))));
   const evenFloor = (n) => Math.floor(Number(n || 0) / 2) * 2;
   const vPx = dipRectToScreenRect(virtualDesktopBounds());
   const bPx = dipRectToScreenRect(bounds);
@@ -1336,7 +1376,7 @@ function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
     "-f",
     "gdigrab",
     "-framerate",
-    "30",
+    normalizedFps,
     "-offset_x",
     String(offX),
     "-offset_y",
@@ -1349,6 +1389,10 @@ function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
     "desktop",
     "-vf",
     `crop=${cropW}:${cropH}:${cropX}:${cropY}`,
+    "-r",
+    normalizedFps,
+    "-vsync",
+    "cfr",
     "-c:v",
     "libx264",
     "-preset",
@@ -1363,17 +1407,22 @@ function ffmpegArgsSelectionCrop(bounds, outputPath, hideNativeCursor) {
   ];
 }
 
-function ffmpegArgsFullDesktop(outputPath, hideNativeCursor) {
+function ffmpegArgsFullDesktop(outputPath, hideNativeCursor, captureFps = 30) {
+  const normalizedFps = String(Math.max(12, Math.min(240, Math.round(Number(captureFps || 30)))));
   return [
     "-y",
     "-f",
     "gdigrab",
     "-framerate",
-    "30",
+    normalizedFps,
     "-draw_mouse",
     hideNativeCursor ? "0" : "1",
     "-i",
     "desktop",
+    "-r",
+    normalizedFps,
+    "-vsync",
+    "cfr",
     "-c:v",
     "libx264",
     "-preset",
@@ -1704,7 +1753,8 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
     await verifyFfmpegAvailable();
 
     const sourceId = payload?.sourceId;
-    const display = mapDisplayFromSource(sourceId);
+    const display = mapDisplayFromSource(sourceId, payload?.sourceDisplayId);
+    const captureFps = preferredCaptureFpsForDisplay(display);
     const selection = payload?.selectionBounds;
     const hasSelection =
       selection &&
@@ -1742,6 +1792,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       ffmpegProcess: null,
       ffmpegStderr: "",
       usingUiohook: false,
+      captureFps,
       isPaused: false,
       pausedAtPerf: null,
       totalPausedMs: 0,
@@ -1790,37 +1841,45 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
     let startup = null;
 
     if (hasSelection) {
-      // In manual selection mode, force selected-area output via crop pipeline.
+      // In manual selection mode, capture selected area directly for better throughput.
       startup = await launchFfmpeg(
-        ffmpegArgsSelectionCrop(activeSession.captureBounds, videoPath, activeSession.hideNativeCursor)
+        ffmpegArgsFor(activeSession.captureBounds, videoPath, activeSession.hideNativeCursor, activeSession.captureFps)
       );
       if (!startup.started) {
-        const diagnostics = (activeSession.ffmpegStderr || "").trim().slice(-4000);
-        stopCursorSampler();
-        stopUiohook();
-        closeRecordingControlsWindow();
-        activeSession = null;
-        stopRecordingStateTicker();
-        notifyRecordingState();
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
+        const firstDiag = (activeSession.ffmpegStderr || "").trim().slice(-3000);
+        activeSession.ffmpegStderr += "\n--- fallback: selected-area crop capture ---\n";
+        startup = await launchFfmpeg(
+          ffmpegArgsSelectionCrop(activeSession.captureBounds, videoPath, activeSession.hideNativeCursor, activeSession.captureFps)
+        );
+        if (!startup.started) {
+          const diagnostics = (activeSession.ffmpegStderr || "").trim().slice(-4000);
+          stopCursorSampler();
+          stopUiohook();
+          closeRecordingControlsWindow();
+          activeSession = null;
+          stopRecordingStateTicker();
+          notifyRecordingState();
+          if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+          if (hasSelection) {
+            openAreaPreviewWindow(captureBounds, false);
+          }
+          return {
+            ok: false,
+            reason:
+              `ffmpeg failed to start selected-area capture (code=${startup.code}, signal=${startup.signal || "none"}).` +
+              (startup.error ? ` ${startup.error}` : ""),
+            ffmpegDiagnostics: `${firstDiag}\n\n${diagnostics}`,
+          };
         }
-        if (hasSelection) {
-          openAreaPreviewWindow(captureBounds, false);
-        }
-        return {
-          ok: false,
-          reason:
-            `ffmpeg failed to start selected-area capture (code=${startup.code}, signal=${startup.signal || "none"}).` +
-            (startup.error ? ` ${startup.error}` : ""),
-          ffmpegDiagnostics: diagnostics,
-        };
+        captureMode = "manual-selection-crop-fallback";
       }
     } else {
       // Attempt 1: region capture for selected display/window.
       startup = await launchFfmpeg(
-        ffmpegArgsFor(activeSession.captureBounds, videoPath, activeSession.hideNativeCursor)
+        ffmpegArgsFor(activeSession.captureBounds, videoPath, activeSession.hideNativeCursor, activeSession.captureFps)
       );
     }
 
@@ -1832,7 +1891,7 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       activeSession.captureBounds = fullBounds;
 
       startup = await launchFfmpeg(
-        ffmpegArgsFullDesktop(videoPath, activeSession.hideNativeCursor)
+        ffmpegArgsFullDesktop(videoPath, activeSession.hideNativeCursor, activeSession.captureFps)
       );
       if (!startup.started) {
         const diagnostics = (activeSession.ffmpegStderr || "").trim().slice(-4000);

@@ -72,6 +72,7 @@ async function loadSources() {
     opt.value = source.id;
     opt.textContent = source.name;
     opt.dataset.name = source.name;
+    opt.dataset.displayId = String(source.displayId || "");
     sourceSelect.appendChild(opt);
   }
   setTimeout(() => {
@@ -83,7 +84,11 @@ async function loadSources() {
 function selectedSource() {
   const opt = sourceSelect.selectedOptions?.[0];
   if (!opt) return null;
-  return { id: opt.value, name: opt.dataset.name || opt.textContent || opt.value };
+  return {
+    id: opt.value,
+    name: opt.dataset.name || opt.textContent || opt.value,
+    displayId: opt.dataset.displayId || "",
+  };
 }
 
 async function startRecording() {
@@ -93,6 +98,7 @@ async function startRecording() {
   const result = await window.recorderApi.startRecording({
     sourceId: src.id,
     sourceName: src.name,
+    sourceDisplayId: src.displayId,
     hideNativeCursor: true,
     autoOpenEditor: true,
     selectionBounds: useSelectedArea ? selectedArea : null,

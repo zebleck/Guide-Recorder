@@ -2289,38 +2289,15 @@ function formatPerfMs(ms, divisor = 1) {
   return (Number(ms || 0) / safeDiv).toFixed(1);
 }
 
-async function seekVideoForFrame(video, sec) {
+async function seekVideoForFrame(video, sec, toleranceSec = 0.0005) {
   const target = Math.max(0, Number(sec || 0));
-  if (Math.abs(Number(video.currentTime || 0) - target) < 0.0005) return;
+  const tolerance = Math.max(0.0005, Number(toleranceSec || 0.0005));
+  const current = Number(video.currentTime || 0);
+  if (Math.abs(current - target) <= tolerance) return;
+  // Monotonic export seeks forward; if decode landed slightly ahead but still in-frame, don't re-seek.
+  if (current > target && current - target <= tolerance * 1.5) return;
   video.currentTime = target;
   await waitForMediaEvent(video, "seeked");
-}
-
-async function waitForNextVideoFrame(video) {
-  if (typeof video?.requestVideoFrameCallback !== "function") {
-    throw new Error("requestVideoFrameCallback is required for deterministic export");
-  }
-  return await new Promise((resolve, reject) => {
-    let callbackId = 0;
-    const cleanup = () => {
-      if (callbackId && typeof video.cancelVideoFrameCallback === "function") {
-        try {
-          video.cancelVideoFrameCallback(callbackId);
-        } catch {
-          // ignore
-        }
-      }
-    };
-    callbackId = video.requestVideoFrameCallback((_, metadata) => {
-      cleanup();
-      const mediaTime = Number(metadata?.mediaTime ?? video.currentTime ?? 0);
-      resolve(mediaTime);
-    });
-  });
-}
-
-async function playForDeterministicExport(video) {
-  await video.play();
 }
 
 async function tryDesktopDeterministicFrameExport({
@@ -2334,7 +2311,7 @@ async function tryDesktopDeterministicFrameExport({
   targetDurationSec,
 }) {
   if (!(targetDurationSec > 0)) return { blob: null, reason: "target duration is 0s" };
-  const fps = preferredDeterministicFps(exportVideo);
+  const fps = await preferredDeterministicFps(exportVideo);
   const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
     return {
@@ -2404,75 +2381,47 @@ async function tryDesktopDeterministicFrameExport({
       }
     };
 
-    const seekStart = performance.now();
-    await seekVideoForFrame(exportVideo, trimStartSec);
-    perf.seekMs += Math.max(0, performance.now() - seekStart);
-    exportVideo.playbackRate = 1;
+    setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
+    const frameStepSec = fps > 0 ? (1 / fps) : 0.033333333;
+    const seekToleranceSec = Math.max(0.0005, frameStepSec * 0.45);
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+      const targetSec = trimStartSec + (frameIndex / fps);
+      const seekStart = performance.now();
+      await seekVideoForFrame(exportVideo, targetSec, seekToleranceSec);
+      perf.seekMs += Math.max(0, performance.now() - seekStart);
 
-    let frameIndex = 0;
-    let targetSec = trimStartSec;
-    const targetStepSec = 1 / fps;
-    const frameEpsilonSec = 0.0006;
-    let decodedFrameCount = 0;
+      const renderMs = targetSec * 1000;
+      const drawStart = performance.now();
+      renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
+      perf.renderMs += Math.max(0, performance.now() - drawStart);
+      const encodeStart = performance.now();
+      const rgbaFrame = canvasToRgbaBuffer(exportCtx, width, height);
+      perf.encodeMs += Math.max(0, performance.now() - encodeStart);
+      fireUpload(rgbaFrame, frameIndex);
+      await drainUploads();
 
-    setStatus(`Deterministic export started. Decoding frames 0/${totalFrames}...`);
-    await playForDeterministicExport(exportVideo);
-    while (frameIndex < totalFrames) {
-      const mediaSec = await waitForNextVideoFrame(exportVideo);
-      decodedFrameCount += 1;
-
-      if (mediaSec + frameEpsilonSec >= targetSec) {
-        while (frameIndex < totalFrames && targetSec <= mediaSec + frameEpsilonSec) {
-        const sampledSec = Math.max(trimStartSec, Math.min(
-          mediaSec,
-          trimEndSec > trimStartSec ? trimEndSec : mediaSec
-        ));
-        const renderMs = sampledSec * 1000;
-        const drawStart = performance.now();
-        renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
-        perf.renderMs += Math.max(0, performance.now() - drawStart);
-        const encodeStart = performance.now();
-        const rgbaFrame = canvasToRgbaBuffer(exportCtx, width, height);
-        perf.encodeMs += Math.max(0, performance.now() - encodeStart);
-        fireUpload(rgbaFrame, frameIndex);
-        await drainUploads();
-
-        frameIndex += 1;
-        targetSec = trimStartSec + (frameIndex * targetStepSec);
-
-        if (frameIndex === 1 || frameIndex % 15 === 0 || frameIndex >= totalFrames) {
-          const done = frameIndex;
-          const elapsedMs = Math.max(1, performance.now() - perf.totalStartMs);
-          const effFps = (done * 1000) / elapsedMs;
-          const seekPer = formatPerfMs(perf.seekMs, done);
-          const renderPer = formatPerfMs(perf.renderMs, done);
-          const encodePer = formatPerfMs(perf.encodeMs, done);
-          setStatus(
-            `Deterministic export: ${done}/${totalFrames} (${effFps.toFixed(1)}fps) `
-            + `seek=${seekPer}ms render=${renderPer}ms encode=${encodePer}ms`
-          );
-          console.log(
-            "[export-perf-live]",
-            `frame=${done}/${totalFrames}`,
-            `fps=${effFps.toFixed(1)}`,
-            `seek_ms_per_frame=${seekPer}`,
-            `render_ms_per_frame=${renderPer}`,
-            `encode_ms_per_frame=${encodePer}`,
-            `upload_wait_ms=${formatPerfMs(perf.uploadWaitMs)}`,
-            `decoded_frames=${decodedFrameCount}`
-          );
-        }
+      const done = frameIndex + 1;
+      if (done === 1 || done % 15 === 0 || done >= totalFrames) {
+        const elapsedMs = Math.max(1, performance.now() - perf.totalStartMs);
+        const effFps = (done * 1000) / elapsedMs;
+        const seekPer = formatPerfMs(perf.seekMs, done);
+        const renderPer = formatPerfMs(perf.renderMs, done);
+        const encodePer = formatPerfMs(perf.encodeMs, done);
+        setStatus(
+          `Deterministic export: ${done}/${totalFrames} (${effFps.toFixed(1)}fps) `
+          + `seek=${seekPer}ms render=${renderPer}ms encode=${encodePer}ms`
+        );
+        console.log(
+          "[export-perf-live]",
+          `frame=${done}/${totalFrames}`,
+          `fps=${effFps.toFixed(1)}`,
+          `seek_ms_per_frame=${seekPer}`,
+          `render_ms_per_frame=${renderPer}`,
+          `encode_ms_per_frame=${encodePer}`,
+          `upload_wait_ms=${formatPerfMs(perf.uploadWaitMs)}`
+        );
       }
-      }
-
-      if (mediaSec >= trimEndSec + frameEpsilonSec && frameIndex >= totalFrames) {
-        break;
-      }
-
-      if (decodedFrameCount % 8 === 0) {
-        if (frameIndex === 0 && decodedFrameCount % 24 === 0) {
-          setStatus(`Deterministic export decoding... 0/${totalFrames} (decoded ${decodedFrameCount} source frames)`);
-        }
+      if (done % 8 === 0) {
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
     }
@@ -2526,7 +2475,19 @@ async function tryDesktopDeterministicFrameExport({
   }
 }
 
-function preferredDeterministicFps(video) {
+async function preferredDeterministicFps(video) {
+  if (isDesktopAutoloadVideoSource()) {
+    const resp = await fetch("/__desktop/source/fps", { cache: "no-store" });
+    if (!resp.ok) {
+      throw new Error(`Could not probe source FPS (${resp.status})`);
+    }
+    const json = await resp.json();
+    const probed = Number(json?.fps || 0);
+    if (probed > 0 && Number.isFinite(probed)) {
+      return Math.max(1, Math.min(240, probed));
+    }
+    throw new Error("Desktop source FPS probe returned invalid value");
+  }
   try {
     const stream = video.captureStream();
     const [track] = stream.getVideoTracks();

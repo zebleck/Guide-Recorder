@@ -2289,13 +2289,9 @@ function formatPerfMs(ms, divisor = 1) {
   return (Number(ms || 0) / safeDiv).toFixed(1);
 }
 
-async function seekVideoForFrame(video, sec, toleranceSec = 0.0005) {
+async function seekVideoForFrame(video, sec) {
   const target = Math.max(0, Number(sec || 0));
-  const tolerance = Math.max(0.0005, Number(toleranceSec || 0.0005));
-  const current = Number(video.currentTime || 0);
-  if (Math.abs(current - target) <= tolerance) return;
-  // Monotonic export seeks forward; if decode landed slightly ahead but still in-frame, don't re-seek.
-  if (current > target && current - target <= tolerance * 1.5) return;
+  if (Math.abs(Number(video.currentTime || 0) - target) < 0.0005) return;
   video.currentTime = target;
   await waitForMediaEvent(video, "seeked");
 }
@@ -2382,12 +2378,10 @@ async function tryDesktopDeterministicFrameExport({
     };
 
     setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
-    const frameStepSec = fps > 0 ? (1 / fps) : 0.033333333;
-    const seekToleranceSec = Math.max(0.0005, frameStepSec * 0.45);
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
       const targetSec = trimStartSec + (frameIndex / fps);
       const seekStart = performance.now();
-      await seekVideoForFrame(exportVideo, targetSec, seekToleranceSec);
+      await seekVideoForFrame(exportVideo, targetSec);
       perf.seekMs += Math.max(0, performance.now() - seekStart);
 
       const renderMs = targetSec * 1000;

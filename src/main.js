@@ -418,6 +418,15 @@ function cursorSnapshotForSession(session, pointOverride = null) {
   return { x: point.x, y: point.y, ...norm };
 }
 
+function pointFromHookEvent(e) {
+  const x = Number(e?.x);
+  const y = Number(e?.y);
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    return { x, y };
+  }
+  return null;
+}
+
 function mapDisplayFromSource(sourceId, explicitDisplayId = "") {
   const directId = Number(explicitDisplayId);
   if (Number.isFinite(directId) && directId > 0) {
@@ -444,9 +453,9 @@ function pushSessionEvent(evt) {
   activeSession.events.push({ t: sessionElapsedMs(activeSession), ...evt });
 }
 
-function sessionElapsedMs(session) {
+function sessionElapsedMs(session, atPerf = null) {
   if (!session || !Number.isFinite(session.startPerf)) return 0;
-  const now = performance.now();
+  const now = Number.isFinite(atPerf) ? Number(atPerf) : performance.now();
   const pausedAccum = Number(session.totalPausedMs || 0);
   const pausedActive = session.isPaused && Number.isFinite(session.pausedAtPerf)
     ? Math.max(0, now - Number(session.pausedAtPerf))
@@ -456,6 +465,8 @@ function sessionElapsedMs(session) {
 
 function startCursorSampler() {
   if (!activeSession) return;
+  const sampleHz = Math.max(12, Math.min(240, Math.round(Number(activeSession.captureFps || 60))));
+  const intervalMs = 1000 / sampleHz;
   activeSession.cursorTimer = setInterval(() => {
     if (!activeSession) return;
     const point = screen.getCursorScreenPoint();
@@ -464,7 +475,7 @@ function startCursorSampler() {
     if (!cursor) return;
     activeSession.lastCursor = cursor;
     pushSessionEvent({ type: "mouse_move", xScreen: cursor.x, yScreen: cursor.y, ...cursor });
-  }, 1000 / 60);
+  }, intervalMs);
 }
 
 function stopCursorSampler() {
@@ -486,14 +497,22 @@ function startUiohookIfAvailable() {
   };
 
   const onMouseDown = (e) => {
-    const point = screen.getCursorScreenPoint();
+    const point = pointFromHookEvent(e) || screen.getCursorScreenPoint();
     if (isPointInRecordingControls(point)) return;
     const cursor = cursorSnapshotForSession(activeSession, point) || activeSession.lastCursor;
     if (cursor) activeSession.lastCursor = cursor;
     pushSessionEvent({ type: "mouse_down", button: mapHookButton(e.button), ...(cursor || {}) });
   };
+  const onMouseMove = (e) => {
+    const point = pointFromHookEvent(e) || screen.getCursorScreenPoint();
+    if (isPointInRecordingControls(point)) return;
+    const cursor = cursorSnapshotForSession(activeSession, point);
+    if (!cursor) return;
+    activeSession.lastCursor = cursor;
+    pushSessionEvent({ type: "mouse_move", xScreen: cursor.x, yScreen: cursor.y, ...cursor });
+  };
   const onMouseUp = (e) => {
-    const point = screen.getCursorScreenPoint();
+    const point = pointFromHookEvent(e) || screen.getCursorScreenPoint();
     if (isPointInRecordingControls(point)) return;
     const cursor = cursorSnapshotForSession(activeSession, point) || activeSession.lastCursor;
     if (cursor) activeSession.lastCursor = cursor;
@@ -502,8 +521,9 @@ function startUiohookIfAvailable() {
   const onKeyDown = (e) => pushSessionEvent({ type: "key_down", keycode: e.keycode });
   const onKeyUp = (e) => pushSessionEvent({ type: "key_up", keycode: e.keycode });
 
-  activeSession.hooks = { onMouseDown, onMouseUp, onKeyDown, onKeyUp };
+  activeSession.hooks = { onMouseDown, onMouseMove, onMouseUp, onKeyDown, onKeyUp };
   uiohook.on("mousedown", onMouseDown);
+  uiohook.on("mousemove", onMouseMove);
   uiohook.on("mouseup", onMouseUp);
   uiohook.on("keydown", onKeyDown);
   uiohook.on("keyup", onKeyUp);
@@ -513,8 +533,9 @@ function startUiohookIfAvailable() {
 
 function stopUiohook() {
   if (!uiohook || !activeSession?.hooks) return;
-  const { onMouseDown, onMouseUp, onKeyDown, onKeyUp } = activeSession.hooks;
+  const { onMouseDown, onMouseMove, onMouseUp, onKeyDown, onKeyUp } = activeSession.hooks;
   uiohook.off("mousedown", onMouseDown);
+  uiohook.off("mousemove", onMouseMove);
   uiohook.off("mouseup", onMouseUp);
   uiohook.off("keydown", onKeyDown);
   uiohook.off("keyup", onKeyUp);
@@ -1487,6 +1508,55 @@ async function probeVideoDimensions(inputPath) {
   });
 }
 
+async function probeVideoDurationSec(inputPath) {
+  return await new Promise((resolve, reject) => {
+    const args = [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      inputPath,
+    ];
+    const proc = spawn("ffprobe", args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      out += String(d || "");
+    });
+    proc.once("error", reject);
+    proc.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error("ffprobe duration probe failed"));
+        return;
+      }
+      const duration = Number(String(out || "").trim());
+      if (!Number.isFinite(duration) || duration <= 0) {
+        reject(new Error("Could not parse video duration"));
+        return;
+      }
+      resolve(duration);
+    });
+  });
+}
+
+function normalizeSessionEventsToDuration(events, sourceDurationMs, targetDurationMs) {
+  const source = Number(sourceDurationMs || 0);
+  const target = Number(targetDurationMs || 0);
+  if (!Array.isArray(events)) return [];
+  if (!(source > 0) || !(target > 0)) return events.map((evt) => ({ ...evt }));
+  const scale = target / source;
+  let lastT = 0;
+  return events.map((evt) => {
+    const rawT = Number(evt?.t || 0);
+    const clamped = Math.max(0, Math.min(target, rawT * scale));
+    // Preserve monotonic event ordering after scaling/rounding.
+    const t = Math.max(lastT, clamped);
+    lastT = t;
+    return { ...evt, t };
+  });
+}
+
 function ffmpegArgsEditorExport(inputPath, outputPath, manifest, dims) {
   const trimStartSec = Math.max(0, Number(manifest?.trimStartSec || 0));
   const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
@@ -1898,6 +1968,7 @@ async function stopRecordingInternal() {
   }
 
   const session = activeSession;
+  const stopPerf = performance.now();
   closeRecordingControlsWindow();
   closeCountdownWindow();
   stopCursorSampler();
@@ -1924,15 +1995,29 @@ async function stopRecordingInternal() {
     return result;
   }
 
-  const durationSec = sessionElapsedMs(session) / 1000;
+  const measuredDurationSec = Math.max(0, sessionElapsedMs(session, stopPerf) / 1000);
+  let recordedDurationSec = measuredDurationSec;
+  try {
+    const probedDuration = await probeVideoDurationSec(session.videoPath);
+    if (Number.isFinite(probedDuration) && probedDuration > 0) {
+      recordedDurationSec = probedDuration;
+    }
+  } catch {
+    // Fall back to local session clock if ffprobe duration probe fails.
+  }
+  const normalizedEvents = normalizeSessionEventsToDuration(
+    session.events,
+    measuredDurationSec * 1000,
+    recordedDurationSec * 1000
+  );
 
   const projectJson = {
     recordedMimeType: "video/mp4",
-    durationSec,
+    durationSec: recordedDurationSec,
     sourceId: session.sourceId,
     sourceName: session.sourceName,
     captureBounds: session.captureBounds,
-    events: session.events,
+    events: normalizedEvents,
     zooms: [],
     texts: [],
   };
@@ -1967,7 +2052,7 @@ async function stopRecordingInternal() {
 
   const result = {
     ok: true,
-    durationSec,
+    durationSec: recordedDurationSec,
     videoPath: latestSaved.videoPath,
     jsonPath: latestSaved.jsonPath,
     editorUrl,
@@ -2040,19 +2125,26 @@ ipcMain.handle("recorder:startRecording", async (_evt, payload) => {
       openAreaPreviewWindow(activeSession.captureBounds, false);
     }
     await showStartCountdown(activeSession.captureBounds, 3);
-    activeSession.startPerf = performance.now();
     if (hasSelection) {
       openAreaPreviewWindow(activeSession.captureBounds, true);
     }
     openRecordingControlsWindow(activeSession.captureBounds);
     notifyRecordingState();
     startRecordingStateTicker();
-
     const usingUiohook = startUiohookIfAvailable();
     activeSession.usingUiohook = usingUiohook;
-    startCursorSampler();
+    if (!usingUiohook) {
+      startCursorSampler();
+    }
 
     const launchFfmpeg = async (args) => {
+      // Anchor input-event timestamps to the exact capture launch attempt.
+      // If we retry with a fallback mode, we reset the timeline to that attempt.
+      if (activeSession) {
+        activeSession.startPerf = performance.now();
+        activeSession.events = [];
+        activeSession.lastCursor = null;
+      }
       const ffmpegProcess = spawn("ffmpeg", args, {
         windowsHide: true,
         stdio: ["pipe", "ignore", "pipe"],

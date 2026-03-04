@@ -1387,26 +1387,26 @@ function eventToCanvasPosition(evt) {
 }
 
 function pointerAt(currentMs) {
-  let latest = null;
-  let inFrame = false;
-  for (const evt of project.events) {
-    if (evt.t > currentMs) break;
-    if (evt.type !== "mouse_move" && evt.type !== "mouse_down" && evt.type !== "mouse_up") continue;
-    if (evt.inFrame === false) {
-      inFrame = false;
-      continue;
+  const evts = project.events;
+  const hi = bisectEvents(currentMs);
+  let prevEvt = null;
+  for (let i = hi; i >= 0; i -= 1) {
+    const evt = evts[i];
+    if (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up") {
+      prevEvt = evt;
+      break;
     }
-    const pos = eventToCanvasPosition(evt);
-    if (!pos) continue;
-    latest = pos;
-    inFrame = true;
   }
 
-  if (!latest || !inFrame) {
-    const rect = videoContentRect();
+  const rect = videoContentRect();
+  if (!prevEvt || prevEvt.inFrame === false) {
     return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   }
-  return { inFrame: true, x: latest.x, y: latest.y };
+  const prevPos = eventToCanvasPosition(prevEvt);
+  if (!prevPos) {
+    return { inFrame: false, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  }
+  return { inFrame: true, x: prevPos.x, y: prevPos.y };
 }
 
 /** Binary-search for the index of the last event with t <= ms. Returns -1 if none. */
@@ -1478,16 +1478,20 @@ function exportEventToPosition(evt, width, height) {
 
 function pointerAtForExport(currentMs, width, height) {
   const evts = project.events;
-  const start = bisectEvents(currentMs);
-  for (let i = start; i >= 0; i -= 1) {
+  const hi = bisectEvents(currentMs);
+  let prevEvt = null;
+  for (let i = hi; i >= 0; i -= 1) {
     const evt = evts[i];
-    if (evt.type !== "mouse_move" && evt.type !== "mouse_down" && evt.type !== "mouse_up") continue;
-    if (evt.inFrame === false) return { inFrame: false, x: width / 2, y: height / 2 };
-    const pos = exportEventToPosition(evt, width, height);
-    if (!pos) continue;
-    return { inFrame: true, x: pos.x, y: pos.y };
+    if (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up") {
+      prevEvt = evt;
+      break;
+    }
   }
-  return { inFrame: false, x: width / 2, y: height / 2 };
+
+  if (!prevEvt || prevEvt.inFrame === false) return { inFrame: false, x: width / 2, y: height / 2 };
+  const prevPos = exportEventToPosition(prevEvt, width, height);
+  if (!prevPos) return { inFrame: false, x: width / 2, y: height / 2 };
+  return { inFrame: true, x: prevPos.x, y: prevPos.y };
 }
 
 function drawCursorOn(renderCtx, pointer) {
@@ -1668,21 +1672,12 @@ function collectFrameOverlayState(currentMs, width, height) {
   let found0 = false;
   let found2 = false;
   let keyDown = null;
-  let pointer = null;
+  let pointer = pointerAtForExport(currentMs, width, height);
   const minKeyMs = currentMs - 1000;
 
   for (let i = hi; i >= 0; i -= 1) {
     const evt = evts[i];
     if (!keyDown && evt.type === "key_down") keyDown = evt;
-
-    if (!pointer && (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up")) {
-      if (evt.inFrame === false) {
-        pointer = { inFrame: false, x: width / 2, y: height / 2 };
-      } else {
-        const pos = exportEventToPosition(evt, width, height);
-        if (pos) pointer = { inFrame: true, x: pos.x, y: pos.y };
-      }
-    }
 
     if (!found0 || !found2) {
       if ((evt.type === "mouse_up" || evt.type === "mouse_down") && (evt.button === 0 || evt.button === 2)) {
@@ -1701,7 +1696,6 @@ function collectFrameOverlayState(currentMs, width, height) {
     }
   }
 
-  if (!pointer) pointer = { inFrame: false, x: width / 2, y: height / 2 };
   return {
     pointer,
     heldSince,

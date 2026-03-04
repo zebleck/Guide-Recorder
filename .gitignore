@@ -4,3 +4,5 @@
 Thumbs.db
 .vscode/
 .claude
+renders
+*.pyc

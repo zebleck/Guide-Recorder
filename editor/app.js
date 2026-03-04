@@ -45,6 +45,9 @@ const cursorTextureInput = document.getElementById("cursorTextureInput");
 const cursorTextureClearBtn = document.getElementById("cursorTextureClearBtn");
 const cursorHotspotXInput = document.getElementById("cursorHotspotX");
 const cursorHotspotYInput = document.getElementById("cursorHotspotY");
+const keyPillFontSizeInput = document.getElementById("keyPillFontSize");
+const keyPillXPctInput = document.getElementById("keyPillXPct");
+const keyPillYPctInput = document.getElementById("keyPillYPct");
 const cursorMotionModeSelect = document.getElementById("cursorMotionMode");
 const cursorSplineGuideHzInput = document.getElementById("cursorSplineGuideHz");
 const cursorPreviewCanvas = document.getElementById("cursorPreviewCanvas");
@@ -136,6 +139,9 @@ const project = {
   cursorTextureName: "",
   cursorHotspotX: 0,
   cursorHotspotY: 0,
+  keyPillFontSize: 18,
+  keyPillXPct: 98,
+  keyPillYPct: 2,
   cursorMotionMode: "raw",
   cursorSplineGuideHz: 18,
   aspectPreset: "source",
@@ -486,6 +492,24 @@ function normalizeCursorSplineGuideHz(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 18;
   return Math.max(2, Math.min(60, Math.round(n)));
+}
+
+function normalizeKeyPillFontSize(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 18;
+  return Math.max(10, Math.min(64, Math.round(n)));
+}
+
+function normalizePct(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(100, n));
+}
+
+function syncKeyPillSettingsUi() {
+  if (keyPillFontSizeInput) keyPillFontSizeInput.value = String(normalizeKeyPillFontSize(project.keyPillFontSize));
+  if (keyPillXPctInput) keyPillXPctInput.value = String(normalizePct(project.keyPillXPct, 98));
+  if (keyPillYPctInput) keyPillYPctInput.value = String(normalizePct(project.keyPillYPct, 2));
 }
 
 function legacySmoothStrengthToGuideHz(value) {
@@ -1052,6 +1076,9 @@ function persistCursorPrefsToLocalStorage() {
       cursorTextureName: project.cursorTextureName || "",
       cursorHotspotX: Number(project.cursorHotspotX || 0),
       cursorHotspotY: Number(project.cursorHotspotY || 0),
+      keyPillFontSize: normalizeKeyPillFontSize(project.keyPillFontSize),
+      keyPillXPct: normalizePct(project.keyPillXPct, 98),
+      keyPillYPct: normalizePct(project.keyPillYPct, 2),
       cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
       cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     };
@@ -1076,6 +1103,9 @@ async function loadCursorPrefsFromLocalStorage() {
     project.cursorOffsetY = Number(data.cursorOffsetY || 0);
     project.cursorHotspotX = Number(data.cursorHotspotX || 0);
     project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+    project.keyPillFontSize = normalizeKeyPillFontSize(data.keyPillFontSize);
+    project.keyPillXPct = normalizePct(data.keyPillXPct, 98);
+    project.keyPillYPct = normalizePct(data.keyPillYPct, 2);
     project.cursorMotionMode = normalizeCursorMotionMode(data.cursorMotionMode);
     project.cursorSplineGuideHz = data.cursorSplineGuideHz != null
       ? normalizeCursorSplineGuideHz(data.cursorSplineGuideHz)
@@ -1086,6 +1116,7 @@ async function loadCursorPrefsFromLocalStorage() {
     if (cursorSplineGuideHzInput) {
       cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
     }
+    syncKeyPillSettingsUi();
     syncCursorMotionModeUi();
     syncCursorHotspotInputs();
     await loadCursorTextureFromDataUrl(
@@ -1406,9 +1437,53 @@ function updateLiveKeyPill(currentMs) {
     keyPill.classList.add("hidden");
     return;
   }
-  const keyLabel = keyDown.key ?? (keyDown.keycode != null ? `KC${keyDown.keycode}` : "Unknown");
-  keyPill.textContent = `Key: ${keyLabel}`;
+  const keyLabel = readableKeyLabel(keyDown);
+  keyPill.textContent = `${keyLabel} pressed`;
   keyPill.classList.remove("hidden");
+}
+
+function readableKeyLabel(evt) {
+  const explicit = String(evt?.key || "").trim();
+  if (explicit) return explicit.length === 1 ? explicit.toUpperCase() : explicit;
+  const code = Number(evt?.keycode);
+  if (!Number.isFinite(code)) return "Key";
+  const map = {
+    1: "Esc",
+    14: "Backspace",
+    15: "Tab",
+    28: "Enter",
+    29: "Ctrl",
+    42: "Shift",
+    54: "Shift",
+    56: "Alt",
+    57: "Space",
+    58: "CapsLock",
+    3613: "Meta",
+    3675: "Meta",
+    57416: "Up",
+    57419: "Left",
+    57421: "Right",
+    57424: "Down",
+    3655: "Home",
+    3657: "End",
+    3663: "Insert",
+    3666: "Delete",
+    3665: "PageUp",
+    3667: "PageDown",
+  };
+  if (map[code]) return map[code];
+
+  if (code >= 59 && code <= 68) return `F${code - 58}`;
+  if (code >= 87 && code <= 88) return `F${code - 78}`;
+  if (code >= 2 && code <= 11) return String((code + 8) % 10);
+
+  const letterCodes = {
+    16: "Q", 17: "W", 18: "E", 19: "R", 20: "T", 21: "Y", 22: "U", 23: "I", 24: "O", 25: "P",
+    30: "A", 31: "S", 32: "D", 33: "F", 34: "G", 35: "H", 36: "J", 37: "K", 38: "L",
+    44: "Z", 45: "X", 46: "C", 47: "V", 48: "B", 49: "N", 50: "M",
+  };
+  if (letterCodes[code]) return letterCodes[code];
+  return `Key ${code}`;
 }
 
 function eventToCanvasPosition(evt) {
@@ -1900,25 +1975,35 @@ function drawKeyPillOn(renderCtx, currentMs, width) {
 function drawKeyPillEventOn(renderCtx, keyDown, currentMs, width) {
   if (!keyDown || currentMs - keyDown.t > 900) return;
 
-  const keyLabel = keyDown.key ?? (keyDown.keycode != null ? `KC${keyDown.keycode}` : "Unknown");
-  const text = `Key: ${keyLabel}`;
-
-  renderCtx.font = "14px Segoe UI";
-  const textW = renderCtx.measureText(text).width;
-  const pillW = textW + 22;
-  const x = width - pillW - 12;
-  const y = 12;
-
+  const keyLabel = readableKeyLabel(keyDown);
+  const text = `${keyLabel} pressed`;
+  const fontSize = normalizeKeyPillFontSize(project.keyPillFontSize);
+  const pad = 12;
+  const requestedFontSpec = `normal 600 ${resolveCanvasFontSpec(fontSize, "Segoe UI")}`.trim();
+  renderCtx.save();
+  renderCtx.font = requestedFontSpec;
+  renderCtx.textAlign = "left";
+  const { boxW: w, boxH: h } = textBoxMetrics(renderCtx, text, fontSize, pad);
+  const frameH = Number(renderCtx.canvas?.height || 0);
+  const anchorX = (normalizePct(project.keyPillXPct, 98) / 100) * width;
+  const anchorY = (normalizePct(project.keyPillYPct, 2) / 100) * Math.max(1, frameH);
+  const unclampedLeft = anchorX - (w / 2);
+  const unclampedTop = anchorY;
+  const left = Math.max(0, Math.min(Math.max(0, width - w), unclampedLeft));
+  const top = Math.max(0, Math.min(Math.max(0, frameH - h), unclampedTop));
+  renderCtx.translate(left, top);
   renderCtx.fillStyle = "rgba(0,0,0,0.72)";
   renderCtx.strokeStyle = "#566181";
   renderCtx.lineWidth = 1;
+  const radius = Math.max(0, Math.min(14, h * 0.35));
   renderCtx.beginPath();
-  renderCtx.roundRect(x, y, pillW, 30, 15);
+  renderCtx.roundRect(0, 0, w, h, radius);
   renderCtx.fill();
   renderCtx.stroke();
-
   renderCtx.fillStyle = "#f3f5fa";
-  renderCtx.fillText(text, x + 11, y + 20);
+  renderCtx.textBaseline = "middle";
+  renderCtx.fillText(text, pad, h / 2, w - pad * 2);
+  renderCtx.restore();
 }
 
 function collectFrameOverlayState(currentMs, width, height) {
@@ -2266,7 +2351,7 @@ function renderExportFrame(
   currentMs,
   width,
   height,
-  { showHoldInfo = true } = {},
+  _options = {},
 ) {
   const sourceW = Math.max(2, Number(sourceVideo?.videoWidth || width || 0));
   const sourceH = Math.max(2, Number(sourceVideo?.videoHeight || height || 0));
@@ -2291,9 +2376,6 @@ function renderExportFrame(
       lo: overlayState.clickLo,
     });
     drawCursorOn(renderCtx, pointer);
-    if (showHoldInfo) {
-      drawHeldButtonsFromStateOn(renderCtx, currentMs, overlayState.heldSince);
-    }
     drawKeyPillEventOn(renderCtx, overlayState.keyDown, currentMs, width);
     drawTextOverlaysOn(renderCtx, currentMs, width, height);
     return;
@@ -2311,10 +2393,6 @@ function renderExportFrame(
     lo: overlayState.clickLo,
   });
   drawCursorOn(composed.ctx, pointer);
-  if (showHoldInfo) {
-    drawHeldButtonsFromStateOn(composed.ctx, currentMs, overlayState.heldSince);
-  }
-  drawKeyPillEventOn(composed.ctx, overlayState.keyDown, currentMs, width);
 
   // Pass 2: apply zoom to whole composed frame (video + overlays together).
   renderCtx.clearRect(0, 0, width, height);
@@ -2322,7 +2400,8 @@ function renderExportFrame(
   renderCtx.fillRect(0, 0, width, height);
   drawZoomedVideoOn(renderCtx, composed.canvas, zoomViewport, width, height);
 
-  // Pass 3: draw text overlays on top of zoomed frame so they stay screen-fixed.
+  // Pass 3: draw screen-fixed overlays on top of zoomed frame.
+  drawKeyPillEventOn(renderCtx, overlayState.keyDown, currentMs, width);
   drawTextOverlaysOn(renderCtx, currentMs, width, height);
 }
 
@@ -2914,6 +2993,9 @@ async function applyLoadedProjectData(data) {
   project.cursorOffsetY = Number(data.cursorOffsetY || 0);
   project.cursorHotspotX = Number(data.cursorHotspotX || 0);
   project.cursorHotspotY = Number(data.cursorHotspotY || 0);
+  project.keyPillFontSize = normalizeKeyPillFontSize(data.keyPillFontSize);
+  project.keyPillXPct = normalizePct(data.keyPillXPct, 98);
+  project.keyPillYPct = normalizePct(data.keyPillYPct, 2);
   project.cursorMotionMode = normalizeCursorMotionMode(data.cursorMotionMode);
   project.cursorSplineGuideHz = data.cursorSplineGuideHz != null
     ? normalizeCursorSplineGuideHz(data.cursorSplineGuideHz)
@@ -2930,6 +3012,7 @@ async function applyLoadedProjectData(data) {
   if (cursorSplineGuideHzInput) {
     cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
   }
+  syncKeyPillSettingsUi();
   syncCursorMotionModeUi();
   syncAspectPresetUi();
   syncRenderSettingsUi();
@@ -3018,6 +3101,9 @@ function serializeProjectState() {
     cursorTextureName: project.cursorTextureName || "",
     cursorHotspotX: Number(project.cursorHotspotX || 0),
     cursorHotspotY: Number(project.cursorHotspotY || 0),
+    keyPillFontSize: normalizeKeyPillFontSize(project.keyPillFontSize),
+    keyPillXPct: normalizePct(project.keyPillXPct, 98),
+    keyPillYPct: normalizePct(project.keyPillYPct, 2),
     cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
     cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
@@ -3237,6 +3323,41 @@ if (cursorSplineGuideHzInput) {
   cursorSplineGuideHzInput.addEventListener("input", () => {
     project.cursorSplineGuideHz = normalizeCursorSplineGuideHz(cursorSplineGuideHzInput.value);
     cursorSplineGuideHzInput.value = String(project.cursorSplineGuideHz);
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  });
+}
+if (keyPillFontSizeInput) {
+  const commitKeyPillFontSize = () => {
+    project.keyPillFontSize = normalizeKeyPillFontSize(keyPillFontSizeInput.value);
+    keyPillFontSizeInput.value = String(project.keyPillFontSize);
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  };
+  keyPillFontSizeInput.addEventListener("input", () => {
+    const raw = Number(keyPillFontSizeInput.value);
+    if (Number.isFinite(raw)) {
+      // Let users type naturally (e.g., "32") without immediate clamp-reset.
+      project.keyPillFontSize = raw;
+    }
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  });
+  keyPillFontSizeInput.addEventListener("change", commitKeyPillFontSize);
+  keyPillFontSizeInput.addEventListener("blur", commitKeyPillFontSize);
+}
+if (keyPillXPctInput) {
+  keyPillXPctInput.addEventListener("input", () => {
+    project.keyPillXPct = normalizePct(keyPillXPctInput.value, 98);
+    syncKeyPillSettingsUi();
+    persistCursorPrefsToLocalStorage();
+    queueDraftProjectPersist();
+  });
+}
+if (keyPillYPctInput) {
+  keyPillYPctInput.addEventListener("input", () => {
+    project.keyPillYPct = normalizePct(keyPillYPctInput.value, 2);
+    syncKeyPillSettingsUi();
     persistCursorPrefsToLocalStorage();
     queueDraftProjectPersist();
   });
@@ -3774,6 +3895,7 @@ if (DEBUG_TEXT_FONT) {
 refreshActionButtons();
 syncAspectPresetUi();
 syncRenderSettingsUi();
+syncKeyPillSettingsUi();
 syncCursorMotionModeUi();
 updateSourceAspectOptionLabel(0, 0);
 syncPlaybackUi();

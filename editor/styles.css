@@ -227,6 +227,44 @@ body::after {
   white-space: nowrap;
 }
 
+.export-progress {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.export-progress.hidden {
+  display: none;
+}
+
+.export-progress-track {
+  flex: 1;
+  min-width: 180px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  border: 1px solid var(--stroke-subtle);
+}
+
+.export-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) 0%, #ffb088 100%);
+  transition: width 120ms linear;
+}
+
+.export-progress-label {
+  min-width: 46px;
+  text-align: right;
+  font-size: 0.76rem;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  opacity: 0.9;
+}
+
 /* ============================================
    Toolbar row
    ============================================ */

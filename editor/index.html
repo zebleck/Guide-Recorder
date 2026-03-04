@@ -97,6 +97,12 @@
             <input id="loadVideoInput" type="file" accept="video/webm,video/mp4,video/*" />
           </label>
         </div>
+        <div id="exportProgress" class="export-progress hidden" aria-live="polite" aria-label="Export progress">
+          <div class="export-progress-track">
+            <div id="exportProgressFill" class="export-progress-fill"></div>
+          </div>
+          <span id="exportProgressLabel" class="export-progress-label">0%</span>
+        </div>
 
       </section>
 

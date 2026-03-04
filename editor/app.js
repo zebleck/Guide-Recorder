@@ -1345,24 +1345,50 @@ function pointerAt(currentMs) {
   return { inFrame: true, x: latest.x, y: latest.y };
 }
 
+/** Binary-search for the index of the last event with t <= ms. Returns -1 if none. */
+function bisectEvents(ms) {
+  const evts = project.events;
+  let lo = 0;
+  let hi = evts.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (evts[mid].t <= ms) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
 function activeHoldsAt(currentMs) {
   const heldSince = { 0: null, 2: null };
-  for (const evt of project.events) {
-    if (evt.t > currentMs) break;
-    if (evt.type === "mouse_down" && (evt.button === 0 || evt.button === 2)) {
-      heldSince[evt.button] = evt.t;
-    }
-    if (evt.type === "mouse_up" && (evt.button === 0 || evt.button === 2)) {
-      heldSince[evt.button] = null;
+  let found0 = false;
+  let found2 = false;
+  const evts = project.events;
+  const start = bisectEvents(currentMs);
+  for (let i = start; i >= 0; i -= 1) {
+    const evt = evts[i];
+    if (found0 && found2) break;
+    if (evt.button !== 0 && evt.button !== 2) continue;
+    if (evt.type === "mouse_up") {
+      if (evt.button === 0 && !found0) { heldSince[0] = null; found0 = true; }
+      if (evt.button === 2 && !found2) { heldSince[2] = null; found2 = true; }
+    } else if (evt.type === "mouse_down") {
+      if (evt.button === 0 && !found0) { heldSince[0] = evt.t; found0 = true; }
+      if (evt.button === 2 && !found2) { heldSince[2] = evt.t; found2 = true; }
     }
   }
   return heldSince;
 }
 
 function lastKeyDownAt(currentMs) {
-  for (let i = project.events.length - 1; i >= 0; i -= 1) {
-    const evt = project.events[i];
-    if (evt.t > currentMs) continue;
+  const evts = project.events;
+  const start = bisectEvents(currentMs);
+  for (let i = start; i >= 0; i -= 1) {
+    const evt = evts[i];
     if (evt.type === "key_down") return evt;
     if (evt.t < currentMs - 1000) break;
   }
@@ -1387,23 +1413,17 @@ function exportEventToPosition(evt, width, height) {
 }
 
 function pointerAtForExport(currentMs, width, height) {
-  let latest = null;
-  let inFrame = false;
-  for (const evt of project.events) {
-    if (evt.t > currentMs) break;
+  const evts = project.events;
+  const start = bisectEvents(currentMs);
+  for (let i = start; i >= 0; i -= 1) {
+    const evt = evts[i];
     if (evt.type !== "mouse_move" && evt.type !== "mouse_down" && evt.type !== "mouse_up") continue;
-    if (evt.inFrame === false) {
-      inFrame = false;
-      continue;
-    }
+    if (evt.inFrame === false) return { inFrame: false, x: width / 2, y: height / 2 };
     const pos = exportEventToPosition(evt, width, height);
     if (!pos) continue;
-    latest = pos;
-    inFrame = true;
+    return { inFrame: true, x: pos.x, y: pos.y };
   }
-
-  if (!latest || !inFrame) return { inFrame: false, x: width / 2, y: height / 2 };
-  return { inFrame: true, x: latest.x, y: latest.y };
+  return { inFrame: false, x: width / 2, y: height / 2 };
 }
 
 function drawCursorOn(renderCtx, pointer) {
@@ -1426,7 +1446,12 @@ function drawCursorOn(renderCtx, pointer) {
 
 function drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport) {
   const life = 460;
-  for (const evt of project.events) {
+  const evts = project.events;
+  const hi = bisectEvents(currentMs);
+  const lo = bisectEvents(currentMs - life);
+  const startIdx = Math.max(0, lo);
+  for (let i = startIdx; i <= hi; i += 1) {
+    const evt = evts[i];
     if (evt.type !== "mouse_down") continue;
     if (evt.inFrame === false) continue;
     const age = currentMs - evt.t;
@@ -1689,6 +1714,29 @@ function renderExportFrame(
   const sourceH = Math.max(2, Number(sourceVideo?.videoHeight || height || 0));
   const pointer = pointerAtForExport(currentMs, sourceW, sourceH);
   const zoomViewport = getZoomViewportAt(currentMs, pointer, sourceW, sourceH);
+
+  // Fast path: skip intermediate compose buffer when no zoom is active.
+  const noZoom = zoomViewport.factor <= 1.001
+    && Math.abs(zoomViewport.sx) <= 0.001
+    && Math.abs(zoomViewport.sy) <= 0.001
+    && Math.abs(zoomViewport.sw - sourceW) <= 0.001
+    && Math.abs(zoomViewport.sh - sourceH) <= 0.001;
+
+  if (noZoom) {
+    renderCtx.clearRect(0, 0, width, height);
+    renderCtx.fillStyle = "#000";
+    renderCtx.fillRect(0, 0, width, height);
+    drawZoomedVideoOn(renderCtx, sourceVideo, null, width, height);
+    drawClickBurstsOn(renderCtx, currentMs, sourceW, sourceH, null);
+    drawCursorOn(renderCtx, pointer);
+    if (showHoldInfo) {
+      drawHeldButtonsOn(renderCtx, currentMs);
+    }
+    drawKeyPillOn(renderCtx, currentMs, width);
+    drawTextOverlaysOn(renderCtx, currentMs, width, height);
+    return;
+  }
+
   const composed = ensureComposeBuffer(sourceW, sourceH);
 
   // Pass 1: compose full frame without zoom.
@@ -2075,7 +2123,7 @@ async function tryDesktopDeterministicFrameExport({
   targetDurationSec,
 }) {
   if (!(targetDurationSec > 0)) return { blob: null, reason: "target duration is 0s" };
-  const fps = 60;
+  const fps = preferredDeterministicFps(exportVideo);
   const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
     return {
@@ -2086,7 +2134,7 @@ async function tryDesktopDeterministicFrameExport({
 
   let jobId = "";
   try {
-    setStatus("Starting deterministic export...");
+    setStatus(`Starting deterministic export (${fps}fps)...`);
     const startResp = await fetch("/__desktop/export/frames/start", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -2104,21 +2152,39 @@ async function tryDesktopDeterministicFrameExport({
     jobId = String(startJson?.jobId || "");
     if (!jobId) return { blob: null, reason: "desktop did not return jobId" };
 
-    for (let i = 0; i < totalFrames; i += 1) {
-      const t = Math.min(trimEndSec, trimStartSec + (i / fps));
-      await seekVideoForFrame(exportVideo, t);
-      renderExportFrame(exportCtx, exportVideo, t * 1000, width, height);
-      const jpg = await canvasToBlob(exportCanvas, "image/jpeg", 0.92);
-      const frameResp = await fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${i}`, {
+    exportVideo.pause();
+
+    const MAX_IN_FLIGHT = 4;
+    const inFlightUploads = [];
+    const fireUpload = (jpg, thisIndex) => {
+      const p = fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
         method: "POST",
         headers: { "Content-Type": "image/jpeg" },
         body: jpg,
+      }).then((resp) => {
+        if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
       });
-      if (!frameResp.ok) return { blob: null, reason: `frame upload failed at ${i} (${frameResp.status})` };
-      if (i % 30 === 0 || i === totalFrames - 1) {
-        setStatus(`Deterministic export: frame ${i + 1}/${totalFrames}`);
+      inFlightUploads.push(p);
+    };
+    const drainUploads = async () => {
+      while (inFlightUploads.length > MAX_IN_FLIGHT) {
+        await inFlightUploads.shift();
+      }
+    };
+
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
+      const frameSec = trimStartSec + (frameIndex / fps);
+      await seekVideoForFrame(exportVideo, frameSec);
+      const renderMs = frameSec * 1000;
+      renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
+      const jpg = await canvasToBlob(exportCanvas, "image/jpeg", 0.92);
+      fireUpload(jpg, frameIndex);
+      await drainUploads();
+      if (frameIndex % 30 === 0 || frameIndex >= totalFrames - 1) {
+        setStatus(`Deterministic export: frame ${frameIndex + 1}/${totalFrames}`);
       }
     }
+    await Promise.all(inFlightUploads);
 
     const finalizeResp = await fetch("/__desktop/export/frames/finalize", {
       method: "POST",
@@ -2148,6 +2214,21 @@ async function tryDesktopDeterministicFrameExport({
       }).catch(() => {});
     }
   }
+}
+
+function preferredDeterministicFps(video) {
+  try {
+    const stream = video.captureStream();
+    const [track] = stream.getVideoTracks();
+    const settings = track?.getSettings ? track.getSettings() : null;
+    const raw = Number(settings?.frameRate || 0);
+    stream.getTracks().forEach((t) => t.stop());
+    if (raw > 45) return 60;
+    if (raw > 0) return 30;
+  } catch {
+    // ignore
+  }
+  return 30;
 }
 
 function saveProjectJson() {

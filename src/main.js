@@ -624,18 +624,73 @@ async function ensureEditorServer() {
           const trimEndRaw = Number(body?.trimEndSec || 0);
           const trimEndSec = trimEndRaw > trimStartSec ? trimEndRaw : 0;
           const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-frame-export-"));
-          const framesDir = path.join(tmpDir, "frames");
-          await fs.mkdir(framesDir, { recursive: true });
           const includeDesktopAudio = Boolean(body?.includeDesktopAudio && latestSaved.videoPath);
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+          const outputPath = path.join(tmpDir, "final.mp4");
+          const args = [
+            "-y",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-framerate",
+            String(fps),
+            "-i",
+            "pipe:0",
+          ];
+          if (includeDesktopAudio) {
+            if (trimStartSec > 0) args.push("-ss", trimStartSec.toFixed(3));
+            args.push("-i", latestSaved.videoPath);
+            args.push("-map", "0:v:0", "-map", "1:a?");
+          } else {
+            args.push("-map", "0:v:0");
+          }
+          args.push(
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+          );
+          if (includeDesktopAudio) {
+            args.push("-c:a", "aac", "-b:a", "160k");
+          }
+          args.push("-shortest", outputPath);
+          const ffmpegProc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+          let ffmpegStderr = "";
+          ffmpegProc.stderr.on("data", (d) => {
+            ffmpegStderr = (ffmpegStderr + String(d || "")).slice(-12000);
+          });
+          const exitState = { code: null, signal: null };
+          const donePromise = new Promise((resolve, reject) => {
+            ffmpegProc.once("error", reject);
+            ffmpegProc.once("exit", (code, signal) => {
+              exitState.code = code;
+              exitState.signal = signal;
+              if (code === 0) resolve();
+              else reject(new Error(`ffmpeg frame-export failed (code=${code}, signal=${signal || "none"}): ${ffmpegStderr}`));
+            });
+          });
           frameExportJobs.set(jobId, {
             jobId,
             tmpDir,
-            framesDir,
+            outputPath,
             fps,
             trimStartSec,
             trimEndSec,
             sourceVideoPath: includeDesktopAudio ? latestSaved.videoPath : "",
+            ffmpegProc,
+            ffmpegStderr,
+            donePromise,
+            exitState,
+            writeChain: Promise.resolve(),
+            finalized: false,
+            queuedBytes: 0,
           });
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ ok: true, jobId }));
@@ -656,11 +711,15 @@ async function ensureEditorServer() {
             res.end(JSON.stringify({ ok: false, error: "Frame export job not found" }));
             return;
           }
-          const frameName = `frame_${String(index).padStart(6, "0")}.jpg`;
-          const outPath = path.join(job.framesDir, frameName);
-          await writeRequestBodyToFile(req, outPath);
+          if (job.finalized) {
+            res.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Frame export job already finalized" }));
+            return;
+          }
+          const frameBuffer = await readRequestBodyBuffer(req, 8 * 1024 * 1024);
+          enqueueFrameBufferToJob(job, frameBuffer);
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ ok: true }));
+          res.end(JSON.stringify({ ok: true, index }));
         } catch (err) {
           res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: false, error: err?.message || "Could not write frame" }));
@@ -679,62 +738,25 @@ async function ensureEditorServer() {
             res.end(JSON.stringify({ ok: false, error: "Frame export job not found" }));
             return;
           }
-          const fps = Math.max(12, Math.min(120, Math.round(Number(body?.fps || job.fps || 60))));
-          const trimStartSec = Math.max(0, Number(body?.trimStartSec ?? job.trimStartSec ?? 0));
-          const outputPath = path.join(job.tmpDir, "final.mp4");
-          const framePattern = path.join(job.framesDir, "frame_%06d.jpg");
-          const args = [
-            "-y",
-            "-framerate",
-            String(fps),
-            "-start_number",
-            "0",
-            "-i",
-            framePattern,
-          ];
-          if (job.sourceVideoPath) {
-            if (trimStartSec > 0) args.push("-ss", trimStartSec.toFixed(3));
-            args.push("-i", job.sourceVideoPath);
-            args.push("-map", "0:v:0", "-map", "1:a?");
-          } else {
-            args.push("-map", "0:v:0");
-          }
-          args.push(
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-          );
-          if (job.sourceVideoPath) {
-            args.push("-c:a", "aac", "-b:a", "160k");
-          }
-          args.push("-shortest", outputPath);
+          job.finalized = true;
+          await job.writeChain;
           await new Promise((resolve, reject) => {
-            const proc = spawn("ffmpeg", args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-            let stderr = "";
-            proc.stderr.on("data", (d) => {
-              stderr = (stderr + String(d || "")).slice(-12000);
-            });
-            proc.once("error", reject);
-            proc.once("exit", (code) => {
-              if (code === 0) resolve();
-              else reject(new Error(`ffmpeg frame-export failed (code=${code}): ${stderr}`));
+            const onErr = (err) => reject(err);
+            job.ffmpegProc.stdin.once("error", onErr);
+            job.ffmpegProc.stdin.end(() => {
+              job.ffmpegProc.stdin.off("error", onErr);
+              resolve();
             });
           });
+          await job.donePromise;
           frameExportJobs.delete(job.jobId);
-          const stat = await fs.stat(outputPath);
+          const stat = await fs.stat(job.outputPath);
           res.writeHead(200, {
             "Content-Type": "video/mp4",
             "Content-Length": String(Number(stat.size || 0)),
             "Cache-Control": "no-store",
           });
-          const stream = fsNative.createReadStream(outputPath);
+          const stream = fsNative.createReadStream(job.outputPath);
           stream.on("error", () => {
             if (!res.headersSent) res.writeHead(500);
             res.end("Frame export stream failed");
@@ -759,6 +781,11 @@ async function ensureEditorServer() {
           const job = frameExportJobs.get(jobId);
           if (job) {
             frameExportJobs.delete(jobId);
+            try {
+              job.ffmpegProc.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
             await safeRemoveDir(job.tmpDir);
           }
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -942,6 +969,55 @@ async function writeRequestBodyToFile(req, outputPath) {
     out.on("error", onErr);
     out.on("finish", resolve);
     req.pipe(out);
+  });
+}
+
+async function readRequestBodyBuffer(req, maxBytes = 10 * 1024 * 1024) {
+  const chunks = [];
+  let total = 0;
+  await new Promise((resolve, reject) => {
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", resolve);
+    req.on("error", reject);
+  });
+  return Buffer.concat(chunks);
+}
+
+function enqueueFrameBufferToJob(job, buffer) {
+  if (!job?.ffmpegProc?.stdin || !buffer) return;
+  job.queuedBytes = Number(job.queuedBytes || 0) + buffer.length;
+  job.writeChain = job.writeChain.then(
+    () =>
+      new Promise((resolve, reject) => {
+        if (job.finalized) {
+          reject(new Error("Frame export job already finalized"));
+          return;
+        }
+        const stdin = job.ffmpegProc.stdin;
+        const onErr = (err) => reject(err);
+        stdin.once("error", onErr);
+        const ok = stdin.write(buffer, (err) => {
+          stdin.off("error", onErr);
+          job.queuedBytes = Math.max(0, Number(job.queuedBytes || 0) - buffer.length);
+          if (err) reject(err);
+          else resolve();
+        });
+        if (!ok) {
+          stdin.once("drain", () => {
+            // callback above resolves after write is fully accepted.
+          });
+        }
+      })
+  );
+  job.writeChain.catch(() => {
+    // propagated during finalize via await job.writeChain
   });
 }
 

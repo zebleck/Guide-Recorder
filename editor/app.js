@@ -53,6 +53,8 @@ let previewFrameCanvas = null;
 let previewFrameCtx = null;
 let composeCanvas = null;
 let composeCtx = null;
+let gpuZoomRenderer = null;
+let gpuZoomDisabled = false;
 const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
 const CURSOR_PREFS_STORAGE_KEY = "guide-recorder.cursor-prefs.v1";
 const EDITOR_DRAFT_DB_NAME = "guide-recorder-editor";
@@ -61,6 +63,7 @@ const EDITOR_DRAFT_PROJECT_KEY = "project";
 const EDITOR_DRAFT_VIDEO_KEY = "video";
 const EFFECT_CLIPBOARD_STORAGE_KEY = "guide-recorder.effect-clipboard.v1";
 const DETERMINISTIC_EXPORT_MAX_FRAMES = 12000;
+const GPU_ZOOM_COMPOSITE_ENABLED = true;
 let cursorTextureImage = null;
 let cursorPreviewMap = null;
 let uiPrimedForPlayback = false;
@@ -95,6 +98,7 @@ const TEXT_TRANSITION_OPTIONS = [
 ];
 const DEBUG_TEXT_FONT = false;
 const textFontDebugSeen = new Set();
+const textLayoutCache = new WeakMap();
 
 const timelineHoverSec = {
   zoom: 0,
@@ -1213,6 +1217,17 @@ function textBoxMetrics(renderCtx, textValue, fontSize, pad) {
   return { boxW, boxH, boxY, ascent, descent, padX, padTop, padBottom, lines: safeLines, lineHeight };
 }
 
+function textBoxMetricsCached(renderCtx, textEffect, requestedFontSpec, fontSize, pad) {
+  const value = String(textEffect?.value ?? "");
+  const fontKey = String(renderCtx.font || requestedFontSpec || "");
+  const key = `${fontKey}|${fontSize}|${pad}|${value}`;
+  const cached = textLayoutCache.get(textEffect);
+  if (cached && cached.key === key) return cached.metrics;
+  const metrics = textBoxMetrics(renderCtx, value, fontSize, pad);
+  textLayoutCache.set(textEffect, { key, metrics });
+  return metrics;
+}
+
 function drawTextOverlays(currentMs) {
   const tSec = currentMs / 1000;
   for (const t of project.texts) {
@@ -1235,7 +1250,13 @@ function drawTextOverlays(currentMs) {
     ctx.font = requestedFontSpec;
     debugLogTextFontUsage("preview", t, requestedFontSpec, ctx.font);
     ctx.textAlign = align;
-    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetrics(ctx, t.value, fontSize, pad);
+    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetricsCached(
+      ctx,
+      t,
+      requestedFontSpec,
+      fontSize,
+      pad
+    );
     const bgX = align === "center" ? -w / 2 : -pad;
     const pivotX = bgX + w / 2;
     const pivotY = boxY + h / 2;
@@ -1444,11 +1465,11 @@ function drawCursorOn(renderCtx, pointer) {
   renderCtx.restore();
 }
 
-function drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport) {
+function drawClickBurstsOn(renderCtx, currentMs, width, height, zoomViewport, range = null) {
   const life = 460;
   const evts = project.events;
-  const hi = bisectEvents(currentMs);
-  const lo = bisectEvents(currentMs - life);
+  const hi = range ? Number(range.hi) : bisectEvents(currentMs);
+  const lo = range ? Number(range.lo) : bisectEvents(currentMs - life);
   const startIdx = Math.max(0, lo);
   for (let i = startIdx; i <= hi; i += 1) {
     const evt = evts[i];
@@ -1500,6 +1521,26 @@ function drawHeldButtonsOn(renderCtx, currentMs) {
   }
 }
 
+function drawHeldButtonsFromStateOn(renderCtx, currentMs, heldSince) {
+  const holds = [];
+  if (heldSince?.[0] != null) holds.push({ label: "L HOLD", downAt: heldSince[0] });
+  if (heldSince?.[2] != null) holds.push({ label: "R HOLD", downAt: heldSince[2] });
+  if (!holds.length) return;
+
+  let y = 30;
+  for (const hold of holds) {
+    const dur = Math.max(0, currentMs - hold.downAt);
+    const text = `${hold.label}: ${formatSec(dur)}s`;
+
+    renderCtx.fillStyle = "rgba(0,0,0,0.6)";
+    renderCtx.fillRect(12, y - 16, 120, 20);
+    renderCtx.fillStyle = "#f3f5fa";
+    renderCtx.font = "12px Segoe UI";
+    renderCtx.fillText(text, 16, y);
+    y += 24;
+  }
+}
+
 function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
   const tSec = currentMs / 1000;
   for (const t of project.texts) {
@@ -1521,7 +1562,13 @@ function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
     renderCtx.font = requestedFontSpec;
     debugLogTextFontUsage("export", t, requestedFontSpec, renderCtx.font);
     renderCtx.textAlign = align;
-    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetrics(renderCtx, t.value, fontSize, pad);
+    const { boxW: w, boxH: h, boxY, lines, lineHeight } = textBoxMetricsCached(
+      renderCtx,
+      t,
+      requestedFontSpec,
+      fontSize,
+      pad
+    );
     const bgX = align === "center" ? -w / 2 : -pad;
     const pivotX = bgX + w / 2;
     const pivotY = boxY + h / 2;
@@ -1544,6 +1591,10 @@ function drawTextOverlaysOn(renderCtx, currentMs, width, height) {
 
 function drawKeyPillOn(renderCtx, currentMs, width) {
   const keyDown = lastKeyDownAt(currentMs);
+  drawKeyPillEventOn(renderCtx, keyDown, currentMs, width);
+}
+
+function drawKeyPillEventOn(renderCtx, keyDown, currentMs, width) {
   if (!keyDown || currentMs - keyDown.t > 900) return;
 
   const keyLabel = keyDown.key ?? (keyDown.keycode != null ? `KC${keyDown.keycode}` : "Unknown");
@@ -1565,6 +1616,56 @@ function drawKeyPillOn(renderCtx, currentMs, width) {
 
   renderCtx.fillStyle = "#f3f5fa";
   renderCtx.fillText(text, x + 11, y + 20);
+}
+
+function collectFrameOverlayState(currentMs, width, height) {
+  const evts = project.events;
+  const hi = bisectEvents(currentMs);
+  const heldSince = { 0: null, 2: null };
+  let found0 = false;
+  let found2 = false;
+  let keyDown = null;
+  let pointer = null;
+  const minKeyMs = currentMs - 1000;
+
+  for (let i = hi; i >= 0; i -= 1) {
+    const evt = evts[i];
+    if (!keyDown && evt.type === "key_down") keyDown = evt;
+
+    if (!pointer && (evt.type === "mouse_move" || evt.type === "mouse_down" || evt.type === "mouse_up")) {
+      if (evt.inFrame === false) {
+        pointer = { inFrame: false, x: width / 2, y: height / 2 };
+      } else {
+        const pos = exportEventToPosition(evt, width, height);
+        if (pos) pointer = { inFrame: true, x: pos.x, y: pos.y };
+      }
+    }
+
+    if (!found0 || !found2) {
+      if ((evt.type === "mouse_up" || evt.type === "mouse_down") && (evt.button === 0 || evt.button === 2)) {
+        if (evt.button === 0 && !found0) {
+          heldSince[0] = evt.type === "mouse_down" ? evt.t : null;
+          found0 = true;
+        } else if (evt.button === 2 && !found2) {
+          heldSince[2] = evt.type === "mouse_down" ? evt.t : null;
+          found2 = true;
+        }
+      }
+    }
+
+    if ((pointer && found0 && found2 && keyDown) || (pointer && found0 && found2 && evt.t < minKeyMs)) {
+      break;
+    }
+  }
+
+  if (!pointer) pointer = { inFrame: false, x: width / 2, y: height / 2 };
+  return {
+    pointer,
+    heldSince,
+    keyDown,
+    clickHi: hi,
+    clickLo: bisectEvents(currentMs - 460),
+  };
 }
 
 function getZoomViewportAt(currentMs, pointer, width, height) {
@@ -1615,10 +1716,7 @@ function getZoomViewportAt(currentMs, pointer, width, height) {
 
 function mapPointThroughViewport(point, zoomViewport, width, height) {
   if (!zoomViewport) return point;
-  const isIdentity = Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
-    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
-    && Math.abs(Number(zoomViewport.sw || width) - width) <= 0.001
-    && Math.abs(Number(zoomViewport.sh || height) - height) <= 0.001;
+  const isIdentity = isIdentityViewport(zoomViewport, width, height);
   if (isIdentity) return point;
   const mapped = {
     x: ((point.x - zoomViewport.sx) * width) / zoomViewport.sw,
@@ -1630,21 +1728,188 @@ function mapPointThroughViewport(point, zoomViewport, width, height) {
   };
 }
 
+function isIdentityViewport(zoomViewport, width, height) {
+  if (!zoomViewport) return true;
+  return Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
+    && Math.abs(Number(zoomViewport.sw || width) - width) <= 0.001
+    && Math.abs(Number(zoomViewport.sh || height) - height) <= 0.001;
+}
+
+function sourceDimensions(sourceLike, fallbackW, fallbackH) {
+  const w = Math.max(1, Number(
+    sourceLike?.videoWidth
+    || sourceLike?.naturalWidth
+    || sourceLike?.width
+    || fallbackW
+    || 1
+  ));
+  const h = Math.max(1, Number(
+    sourceLike?.videoHeight
+    || sourceLike?.naturalHeight
+    || sourceLike?.height
+    || fallbackH
+    || 1
+  ));
+  return { width: w, height: h };
+}
+
+function createGpuZoomRenderer() {
+  const canvasEl = document.createElement("canvas");
+  const gl = canvasEl.getContext("webgl", {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: false,
+    premultipliedAlpha: false,
+  });
+  if (!gl) return null;
+
+  const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+  const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+  if (!vertexShader || !fragmentShader) return null;
+
+  gl.shaderSource(vertexShader, `
+    attribute vec2 aPos;
+    varying vec2 vUv;
+    void main() {
+      vUv = (aPos + 1.0) * 0.5;
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `);
+  gl.compileShader(vertexShader);
+  if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) return null;
+
+  gl.shaderSource(fragmentShader, `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform sampler2D uTex;
+    uniform vec4 uSrcRect;
+    void main() {
+      vec2 topLeftUv = vec2(vUv.x, 1.0 - vUv.y);
+      vec2 sampleUv = vec2(
+        uSrcRect.x + topLeftUv.x * uSrcRect.z,
+        uSrcRect.y + topLeftUv.y * uSrcRect.w
+      );
+      gl_FragColor = texture2D(uTex, sampleUv);
+    }
+  `);
+  gl.compileShader(fragmentShader);
+  if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) return null;
+
+  const program = gl.createProgram();
+  if (!program) return null;
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+  gl.useProgram(program);
+
+  const posLoc = gl.getAttribLocation(program, "aPos");
+  const srcRectLoc = gl.getUniformLocation(program, "uSrcRect");
+  if (posLoc < 0 || !srcRectLoc) return null;
+
+  const positionBuffer = gl.createBuffer();
+  const tex = gl.createTexture();
+  if (!positionBuffer || !tex) return null;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1, -1,
+    1, -1,
+    -1, 1,
+    1, 1,
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.uniform1i(gl.getUniformLocation(program, "uTex"), 0);
+
+  return {
+    canvas: canvasEl,
+    gl,
+    program,
+    srcRectLoc,
+    texture: tex,
+  };
+}
+
+function ensureGpuZoomRenderer(width, height) {
+  if (!GPU_ZOOM_COMPOSITE_ENABLED || gpuZoomDisabled) return null;
+  if (!gpuZoomRenderer) {
+    gpuZoomRenderer = createGpuZoomRenderer();
+    if (!gpuZoomRenderer) {
+      gpuZoomDisabled = true;
+      return null;
+    }
+  }
+  const w = Math.max(1, Math.round(Number(width || 0)));
+  const h = Math.max(1, Math.round(Number(height || 0)));
+  if (gpuZoomRenderer.canvas.width !== w) gpuZoomRenderer.canvas.width = w;
+  if (gpuZoomRenderer.canvas.height !== h) gpuZoomRenderer.canvas.height = h;
+  return gpuZoomRenderer;
+}
+
+function drawZoomedVideoGpu(renderCtx, sourceLike, zoomViewport, width, height) {
+  const renderer = ensureGpuZoomRenderer(width, height);
+  if (!renderer || !zoomViewport) return false;
+  const sourceSize = sourceDimensions(sourceLike, width, height);
+  const sourceW = sourceSize.width;
+  const sourceH = sourceSize.height;
+  if (isIdentityViewport(zoomViewport, sourceW, sourceH)) return false;
+
+  const gl = renderer.gl;
+  const sx = Math.max(0, Math.min(sourceW, Number(zoomViewport.sx || 0)));
+  const sy = Math.max(0, Math.min(sourceH, Number(zoomViewport.sy || 0)));
+  const sw = Math.max(1, Math.min(sourceW - sx, Number(zoomViewport.sw || sourceW)));
+  const sh = Math.max(1, Math.min(sourceH - sy, Number(zoomViewport.sh || sourceH)));
+
+  try {
+    gl.viewport(0, 0, renderer.canvas.width, renderer.canvas.height);
+    gl.useProgram(renderer.program);
+    gl.bindTexture(gl.TEXTURE_2D, renderer.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceLike);
+    gl.uniform4f(
+      renderer.srcRectLoc,
+      sx / sourceW,
+      sy / sourceH,
+      sw / sourceW,
+      sh / sourceH
+    );
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    renderCtx.imageSmoothingEnabled = true;
+    renderCtx.imageSmoothingQuality = "high";
+    renderCtx.drawImage(renderer.canvas, 0, 0, width, height);
+    return true;
+  } catch {
+    gpuZoomDisabled = true;
+    gpuZoomRenderer = null;
+    return false;
+  }
+}
+
 function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) {
   renderCtx.imageSmoothingEnabled = true;
   renderCtx.imageSmoothingQuality = "high";
+  const src = sourceDimensions(sourceVideo, width, height);
   if (!zoomViewport) {
     renderCtx.drawImage(sourceVideo, 0, 0, width, height);
     return;
   }
-  const isIdentity = Math.abs(Number(zoomViewport.sx || 0)) <= 0.001
-    && Math.abs(Number(zoomViewport.sy || 0)) <= 0.001
-    && Math.abs(Number(zoomViewport.sw || width) - width) <= 0.001
-    && Math.abs(Number(zoomViewport.sh || height) - height) <= 0.001;
+  const isIdentity = isIdentityViewport(zoomViewport, src.width, src.height);
   if (isIdentity) {
     renderCtx.drawImage(sourceVideo, 0, 0, width, height);
     return;
   }
+  const drewViaGpu = drawZoomedVideoGpu(renderCtx, sourceVideo, zoomViewport, width, height);
+  if (drewViaGpu) return;
   renderCtx.drawImage(
     sourceVideo,
     zoomViewport.sx,
@@ -1712,7 +1977,8 @@ function renderExportFrame(
 ) {
   const sourceW = Math.max(2, Number(sourceVideo?.videoWidth || width || 0));
   const sourceH = Math.max(2, Number(sourceVideo?.videoHeight || height || 0));
-  const pointer = pointerAtForExport(currentMs, sourceW, sourceH);
+  const overlayState = collectFrameOverlayState(currentMs, sourceW, sourceH);
+  const pointer = overlayState.pointer;
   const zoomViewport = getZoomViewportAt(currentMs, pointer, sourceW, sourceH);
 
   // Fast path: skip intermediate compose buffer when no zoom is active.
@@ -1727,12 +1993,15 @@ function renderExportFrame(
     renderCtx.fillStyle = "#000";
     renderCtx.fillRect(0, 0, width, height);
     drawZoomedVideoOn(renderCtx, sourceVideo, null, width, height);
-    drawClickBurstsOn(renderCtx, currentMs, sourceW, sourceH, null);
+    drawClickBurstsOn(renderCtx, currentMs, sourceW, sourceH, null, {
+      hi: overlayState.clickHi,
+      lo: overlayState.clickLo,
+    });
     drawCursorOn(renderCtx, pointer);
     if (showHoldInfo) {
-      drawHeldButtonsOn(renderCtx, currentMs);
+      drawHeldButtonsFromStateOn(renderCtx, currentMs, overlayState.heldSince);
     }
-    drawKeyPillOn(renderCtx, currentMs, width);
+    drawKeyPillEventOn(renderCtx, overlayState.keyDown, currentMs, width);
     drawTextOverlaysOn(renderCtx, currentMs, width, height);
     return;
   }
@@ -1744,12 +2013,15 @@ function renderExportFrame(
   composed.ctx.fillStyle = "#000";
   composed.ctx.fillRect(0, 0, sourceW, sourceH);
   drawZoomedVideoOn(composed.ctx, sourceVideo, null, sourceW, sourceH);
-  drawClickBurstsOn(composed.ctx, currentMs, sourceW, sourceH, null);
+  drawClickBurstsOn(composed.ctx, currentMs, sourceW, sourceH, null, {
+    hi: overlayState.clickHi,
+    lo: overlayState.clickLo,
+  });
   drawCursorOn(composed.ctx, pointer);
   if (showHoldInfo) {
-    drawHeldButtonsOn(composed.ctx, currentMs);
+    drawHeldButtonsFromStateOn(composed.ctx, currentMs, overlayState.heldSince);
   }
-  drawKeyPillOn(composed.ctx, currentMs, width);
+  drawKeyPillEventOn(composed.ctx, overlayState.keyDown, currentMs, width);
 
   // Pass 2: apply zoom to whole composed frame (video + overlays together).
   renderCtx.clearRect(0, 0, width, height);
@@ -1863,99 +2135,7 @@ async function exportFinalVideo() {
       setStatus("Final video exported with effects (deterministic MP4).");
       return;
     }
-    if (deterministic?.reason) {
-      const msg = `Deterministic export skipped (${deterministic.reason}), using realtime path.`;
-      setStatus(msg);
-      console.warn("[export-debug]", msg);
-    }
-
-    const fps = 60;
-    const canvasStream = exportCanvas.captureStream(fps);
-
-    let audioTracks = [];
-    try {
-      const audioStream = exportVideo.captureStream();
-      audioTracks = audioStream.getAudioTracks();
-    } catch {
-      audioTracks = [];
-    }
-
-    exportStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
-
-    const mimeType = preferredExportMimeType();
-    const recorder = mimeType
-      ? new MediaRecorder(exportStream, { mimeType, videoBitsPerSecond: PREVIEW_EXPORT_VIDEO_BITRATE })
-      : new MediaRecorder(exportStream, { videoBitsPerSecond: PREVIEW_EXPORT_VIDEO_BITRATE });
-
-    const exportChunks = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) exportChunks.push(e.data);
-    };
-
-    const stopped = new Promise((resolve) => {
-      recorder.onstop = resolve;
-    });
-
-    let done = false;
-    let lastMediaSec = trimStartSec;
-    let lastAdvanceAt = performance.now();
-    let lastRecoverAt = 0;
-    const drawLoop = () => {
-      const mediaSec = Math.max(trimStartSec, Number(exportVideo.currentTime || 0));
-      const now = performance.now();
-      if (mediaSec > lastMediaSec + 0.0005) {
-        lastMediaSec = mediaSec;
-        lastAdvanceAt = now;
-      } else if (now - lastAdvanceAt > 1200 && now - lastRecoverAt > 1200) {
-        lastRecoverAt = now;
-        try {
-          exportVideo.pause();
-          exportVideo.play().catch(() => {});
-        } catch {
-          // ignore
-        }
-      }
-      const relSec = Math.max(0, mediaSec - trimStartSec);
-      const clampedRelMs = targetDurationMs > 0 ? Math.min(relSec * 1000, targetDurationMs) : relSec * 1000;
-      const renderMs = trimStartSec * 1000 + clampedRelMs;
-      renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
-
-      if ((targetDurationMs > 0 && clampedRelMs >= targetDurationMs) || exportVideo.ended || mediaSec >= trimEndSec) {
-        done = true;
-        try {
-          exportVideo.pause();
-          if (targetDurationSec > 0) exportVideo.currentTime = trimEndSec;
-        } catch {
-          // ignore
-        }
-        if (recorder.state !== "inactive") recorder.stop();
-        return;
-      }
-      raf = requestAnimationFrame(drawLoop);
-    };
-
-    renderExportFrame(exportCtx, exportVideo, trimStartSec * 1000, width, height);
-    recorder.start(100);
-    if (trimStartSec > 0) {
-      exportVideo.currentTime = trimStartSec;
-      await waitForMediaEvent(exportVideo, "seeked");
-    }
-    await exportVideo.play();
-    raf = requestAnimationFrame(drawLoop);
-
-    await stopped;
-    if (!done) cancelAnimationFrame(raf);
-
-    const blob = new Blob(exportChunks, {
-      type: recorder.mimeType || "video/webm",
-    });
-    const mp4Blob = await tryDesktopTranscodeMp4(blob, fps);
-    const mp4Ok = mp4Blob ? await validateVideoBlobDuration(mp4Blob, targetDurationSec * 0.9) : false;
-    if (!mp4Blob || !mp4Ok) {
-      throw new Error("MP4 transcode failed or produced invalid output.");
-    }
-    downloadBlob(mp4Blob, "guide-recorder-final.mp4");
-    setStatus("Final video exported with effects (MP4 via FFmpeg).");
+    throw new Error(deterministic?.reason || "Deterministic export did not produce output");
   } catch (err) {
     setStatus(`Export failed: ${err.message || String(err)}`);
   } finally {
@@ -2096,13 +2276,17 @@ async function tryDesktopTranscodeMp4(sourceBlob, fps = 60) {
   }
 }
 
-function canvasToBlob(canvasEl, type, quality) {
-  return new Promise((resolve, reject) => {
-    canvasEl.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("Canvas encoding failed"));
-    }, type, quality);
-  });
+function canvasToRgbaBuffer(renderCtx, width, height) {
+  const w = Math.max(1, Math.round(Number(width || 0)));
+  const h = Math.max(1, Math.round(Number(height || 0)));
+  const imageData = renderCtx.getImageData(0, 0, w, h);
+  // Slice to detach from the backing buffer and keep a tightly-sized payload.
+  return imageData.data.buffer.slice(0);
+}
+
+function formatPerfMs(ms, divisor = 1) {
+  const safeDiv = Math.max(1, Number(divisor || 1));
+  return (Number(ms || 0) / safeDiv).toFixed(1);
 }
 
 async function seekVideoForFrame(video, sec) {
@@ -2110,6 +2294,33 @@ async function seekVideoForFrame(video, sec) {
   if (Math.abs(Number(video.currentTime || 0) - target) < 0.0005) return;
   video.currentTime = target;
   await waitForMediaEvent(video, "seeked");
+}
+
+async function waitForNextVideoFrame(video) {
+  if (typeof video?.requestVideoFrameCallback !== "function") {
+    throw new Error("requestVideoFrameCallback is required for deterministic export");
+  }
+  return await new Promise((resolve, reject) => {
+    let callbackId = 0;
+    const cleanup = () => {
+      if (callbackId && typeof video.cancelVideoFrameCallback === "function") {
+        try {
+          video.cancelVideoFrameCallback(callbackId);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    callbackId = video.requestVideoFrameCallback((_, metadata) => {
+      cleanup();
+      const mediaTime = Number(metadata?.mediaTime ?? video.currentTime ?? 0);
+      resolve(mediaTime);
+    });
+  });
+}
+
+async function playForDeterministicExport(video) {
+  await video.play();
 }
 
 async function tryDesktopDeterministicFrameExport({
@@ -2134,7 +2345,19 @@ async function tryDesktopDeterministicFrameExport({
 
   let jobId = "";
   try {
+    const perf = {
+      totalStartMs: performance.now(),
+      seekMs: 0,
+      renderMs: 0,
+      encodeMs: 0,
+      uploadWaitMs: 0,
+      uploadHttpMs: 0,
+      uploadCount: 0,
+      startReqMs: 0,
+      finalizeReqMs: 0,
+    };
     setStatus(`Starting deterministic export (${fps}fps)...`);
+    const startReqStart = performance.now();
     const startResp = await fetch("/__desktop/export/frames/start", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -2149,43 +2372,116 @@ async function tryDesktopDeterministicFrameExport({
     });
     if (!startResp.ok) return { blob: null, reason: `start endpoint failed (${startResp.status})` };
     const startJson = await startResp.json();
+    perf.startReqMs = Math.max(0, performance.now() - startReqStart);
     jobId = String(startJson?.jobId || "");
     if (!jobId) return { blob: null, reason: "desktop did not return jobId" };
 
     exportVideo.pause();
 
-    const MAX_IN_FLIGHT = 4;
+    const MAX_IN_FLIGHT = Math.max(
+      6,
+      Math.min(16, Number(window.navigator?.hardwareConcurrency || 8))
+    );
     const inFlightUploads = [];
-    const fireUpload = (jpg, thisIndex) => {
+    const fireUpload = (rgbaFrame, thisIndex) => {
+      const uploadStart = performance.now();
       const p = fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
         method: "POST",
-        headers: { "Content-Type": "image/jpeg" },
-        body: jpg,
+        headers: { "Content-Type": "application/octet-stream" },
+        body: rgbaFrame,
       }).then((resp) => {
         if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
+        perf.uploadHttpMs += Math.max(0, performance.now() - uploadStart);
+        perf.uploadCount += 1;
       });
       inFlightUploads.push(p);
     };
     const drainUploads = async () => {
       while (inFlightUploads.length > MAX_IN_FLIGHT) {
+        const waitStart = performance.now();
         await inFlightUploads.shift();
+        perf.uploadWaitMs += Math.max(0, performance.now() - waitStart);
       }
     };
 
-    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-      const frameSec = trimStartSec + (frameIndex / fps);
-      await seekVideoForFrame(exportVideo, frameSec);
-      const renderMs = frameSec * 1000;
-      renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
-      const jpg = await canvasToBlob(exportCanvas, "image/jpeg", 0.92);
-      fireUpload(jpg, frameIndex);
-      await drainUploads();
-      if (frameIndex % 30 === 0 || frameIndex >= totalFrames - 1) {
-        setStatus(`Deterministic export: frame ${frameIndex + 1}/${totalFrames}`);
+    const seekStart = performance.now();
+    await seekVideoForFrame(exportVideo, trimStartSec);
+    perf.seekMs += Math.max(0, performance.now() - seekStart);
+    exportVideo.playbackRate = 1;
+
+    let frameIndex = 0;
+    let targetSec = trimStartSec;
+    const targetStepSec = 1 / fps;
+    const frameEpsilonSec = 0.0006;
+    let decodedFrameCount = 0;
+
+    setStatus(`Deterministic export started. Decoding frames 0/${totalFrames}...`);
+    await playForDeterministicExport(exportVideo);
+    while (frameIndex < totalFrames) {
+      const mediaSec = await waitForNextVideoFrame(exportVideo);
+      decodedFrameCount += 1;
+
+      if (mediaSec + frameEpsilonSec >= targetSec) {
+        while (frameIndex < totalFrames && targetSec <= mediaSec + frameEpsilonSec) {
+        const sampledSec = Math.max(trimStartSec, Math.min(
+          mediaSec,
+          trimEndSec > trimStartSec ? trimEndSec : mediaSec
+        ));
+        const renderMs = sampledSec * 1000;
+        const drawStart = performance.now();
+        renderExportFrame(exportCtx, exportVideo, renderMs, width, height);
+        perf.renderMs += Math.max(0, performance.now() - drawStart);
+        const encodeStart = performance.now();
+        const rgbaFrame = canvasToRgbaBuffer(exportCtx, width, height);
+        perf.encodeMs += Math.max(0, performance.now() - encodeStart);
+        fireUpload(rgbaFrame, frameIndex);
+        await drainUploads();
+
+        frameIndex += 1;
+        targetSec = trimStartSec + (frameIndex * targetStepSec);
+
+        if (frameIndex === 1 || frameIndex % 15 === 0 || frameIndex >= totalFrames) {
+          const done = frameIndex;
+          const elapsedMs = Math.max(1, performance.now() - perf.totalStartMs);
+          const effFps = (done * 1000) / elapsedMs;
+          const seekPer = formatPerfMs(perf.seekMs, done);
+          const renderPer = formatPerfMs(perf.renderMs, done);
+          const encodePer = formatPerfMs(perf.encodeMs, done);
+          setStatus(
+            `Deterministic export: ${done}/${totalFrames} (${effFps.toFixed(1)}fps) `
+            + `seek=${seekPer}ms render=${renderPer}ms encode=${encodePer}ms`
+          );
+          console.log(
+            "[export-perf-live]",
+            `frame=${done}/${totalFrames}`,
+            `fps=${effFps.toFixed(1)}`,
+            `seek_ms_per_frame=${seekPer}`,
+            `render_ms_per_frame=${renderPer}`,
+            `encode_ms_per_frame=${encodePer}`,
+            `upload_wait_ms=${formatPerfMs(perf.uploadWaitMs)}`,
+            `decoded_frames=${decodedFrameCount}`
+          );
+        }
+      }
+      }
+
+      if (mediaSec >= trimEndSec + frameEpsilonSec && frameIndex >= totalFrames) {
+        break;
+      }
+
+      if (decodedFrameCount % 8 === 0) {
+        if (frameIndex === 0 && decodedFrameCount % 24 === 0) {
+          setStatus(`Deterministic export decoding... 0/${totalFrames} (decoded ${decodedFrameCount} source frames)`);
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
     }
+    exportVideo.pause();
+    const drainAllStart = performance.now();
     await Promise.all(inFlightUploads);
+    perf.uploadWaitMs += Math.max(0, performance.now() - drainAllStart);
 
+    const finalizeStart = performance.now();
     const finalizeResp = await fetch("/__desktop/export/frames/finalize", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -2196,12 +2492,26 @@ async function tryDesktopDeterministicFrameExport({
         trimEndSec,
       }),
     });
+    perf.finalizeReqMs = Math.max(0, performance.now() - finalizeStart);
     if (!finalizeResp.ok) return { blob: null, reason: `finalize failed (${finalizeResp.status})` };
     const outBlob = await finalizeResp.blob();
     if (!outBlob || outBlob.size <= 0) return { blob: null, reason: "finalize returned empty file" };
     const outMp4 = new Blob([outBlob], { type: "video/mp4" });
     const ok = await validateVideoBlobDuration(outMp4, targetDurationSec * 0.9);
     if (!ok) return { blob: null, reason: "final MP4 failed duration validation" };
+    const totalMs = Math.max(1, performance.now() - perf.totalStartMs);
+    const summary = [
+      `deterministic perf (${totalFrames}f @ ${fps}fps target):`,
+      `total=${formatPerfMs(totalMs)}ms (${((totalFrames * 1000) / totalMs).toFixed(1)}fps)`,
+      `seek=${formatPerfMs(perf.seekMs)}ms (${formatPerfMs(perf.seekMs, totalFrames)}/f)`,
+      `render=${formatPerfMs(perf.renderMs)}ms (${formatPerfMs(perf.renderMs, totalFrames)}/f)`,
+      `encode=${formatPerfMs(perf.encodeMs)}ms (${formatPerfMs(perf.encodeMs, totalFrames)}/f)`,
+      `upload_wait=${formatPerfMs(perf.uploadWaitMs)}ms`,
+      `upload_http=${formatPerfMs(perf.uploadHttpMs)}ms for ${perf.uploadCount} frames`,
+      `start_req=${formatPerfMs(perf.startReqMs)}ms finalize_req=${formatPerfMs(perf.finalizeReqMs)}ms`,
+    ].join(" ");
+    console.log("[export-perf]", summary);
+    setStatus(`Deterministic export done. ${((totalFrames * 1000) / totalMs).toFixed(1)}fps (see console [export-perf]).`);
     return { blob: outMp4, reason: "" };
   } catch (err) {
     return { blob: null, reason: err?.message || "exception in deterministic export" };

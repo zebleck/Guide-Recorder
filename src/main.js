@@ -620,6 +620,11 @@ async function ensureEditorServer() {
           await verifyFfmpegAvailable();
           const body = await readJsonBody(req);
           const fps = Math.max(12, Math.min(120, Math.round(Number(body?.fps || 60))));
+          const frameWidth = Math.max(2, Math.round(Number(body?.width || 0)));
+          const frameHeight = Math.max(2, Math.round(Number(body?.height || 0)));
+          if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight) || frameWidth < 2 || frameHeight < 2) {
+            throw new Error("Invalid frame dimensions for deterministic export");
+          }
           const trimStartSec = Math.max(0, Number(body?.trimStartSec || 0));
           const trimEndRaw = Number(body?.trimEndSec || 0);
           const trimEndSec = trimEndRaw > trimStartSec ? trimEndRaw : 0;
@@ -629,10 +634,9 @@ async function ensureEditorServer() {
           const outputPath = path.join(tmpDir, "final.mp4");
           const args = [
             "-y",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-video_size", `${frameWidth}x${frameHeight}`,
             "-framerate",
             String(fps),
             "-i",
@@ -691,6 +695,9 @@ async function ensureEditorServer() {
             writeChain: Promise.resolve(),
             finalized: false,
             queuedBytes: 0,
+            frameWidth,
+            frameHeight,
+            frameMaxBytes: Math.max(1024, frameWidth * frameHeight * 4 + 4096),
           });
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ ok: true, jobId }));
@@ -716,7 +723,16 @@ async function ensureEditorServer() {
             res.end(JSON.stringify({ ok: false, error: "Frame export job already finalized" }));
             return;
           }
-          const frameBuffer = await readRequestBodyBuffer(req, 8 * 1024 * 1024);
+          const frameBuffer = await readRequestBodyBuffer(req, Math.max(8 * 1024 * 1024, Number(job.frameMaxBytes || 0)));
+          const expectedBytes = Math.max(1, Number(job.frameWidth || 1) * Number(job.frameHeight || 1) * 4);
+          if (frameBuffer.length !== expectedBytes) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({
+              ok: false,
+              error: `Invalid frame byte length (${frameBuffer.length}, expected ${expectedBytes})`,
+            }));
+            return;
+          }
           enqueueFrameBufferToJob(job, frameBuffer);
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ ok: true, index }));

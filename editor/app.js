@@ -2377,7 +2377,7 @@ async function tryDesktopDeterministicFrameExport({
         trimStartSec,
         trimEndSec,
         includeDesktopAudio: isDesktopAutoloadVideoSource(),
-        frameFormat: "jpeg",
+        frameFormat: "png",
       }),
     });
     if (!startResp.ok) return { blob: null, reason: `start endpoint failed (${startResp.status})` };
@@ -2392,7 +2392,7 @@ async function tryDesktopDeterministicFrameExport({
       const uploadStart = performance.now();
       const resp = await fetch(`/__desktop/export/frames/frame?jobId=${encodeURIComponent(jobId)}&index=${thisIndex}`, {
         method: "POST",
-        headers: { "Content-Type": "image/jpeg" },
+        headers: { "Content-Type": "image/png" },
         body: framePayload,
       });
       if (!resp.ok) throw new Error(`frame upload failed at ${thisIndex} (${resp.status})`);
@@ -2449,10 +2449,10 @@ async function tryDesktopDeterministicFrameExport({
       renderExportFrame(exportCtx, currentVideo, renderMs, width, height);
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
-      const jpegFrame = await canvasToBlob(exportCanvas, "image/jpeg", 0.9);
+      const pngFrame = await canvasToBlob(exportCanvas, "image/png");
       perf.encodeMs += Math.max(0, performance.now() - encodeStart);
       await waitForFreeUploadSlot();
-      const trackedUpload = uploadFrame(jpegFrame, frameIndex).catch((err) => {
+      const trackedUpload = uploadFrame(pngFrame, frameIndex).catch((err) => {
         uploadError = err;
         throw err;
       }).finally(() => {

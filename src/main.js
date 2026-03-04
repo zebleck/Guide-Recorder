@@ -646,7 +646,8 @@ async function ensureEditorServer() {
           const trimStartSec = Math.max(0, Number(body?.trimStartSec || 0));
           const trimEndRaw = Number(body?.trimEndSec || 0);
           const trimEndSec = trimEndRaw > trimStartSec ? trimEndRaw : 0;
-          const frameFormat = String(body?.frameFormat || "raw").toLowerCase() === "jpeg" ? "jpeg" : "raw";
+          const frameFormatRaw = String(body?.frameFormat || "raw").toLowerCase();
+          const frameFormat = frameFormatRaw === "jpeg" || frameFormatRaw === "png" ? frameFormatRaw : "raw";
           const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-frame-export-"));
           const includeDesktopAudio = Boolean(body?.includeDesktopAudio && latestSaved.videoPath);
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -656,6 +657,13 @@ async function ensureEditorServer() {
             args.push(
               "-f", "image2pipe",
               "-vcodec", "mjpeg",
+              "-framerate", String(fps),
+              "-i", "pipe:0"
+            );
+          } else if (frameFormat === "png") {
+            args.push(
+              "-f", "image2pipe",
+              "-vcodec", "png",
               "-framerate", String(fps),
               "-i", "pipe:0"
             );
@@ -728,7 +736,7 @@ async function ensureEditorServer() {
             frameWidth,
             frameHeight,
             frameFormat,
-            frameMaxBytes: frameFormat === "jpeg"
+            frameMaxBytes: frameFormat === "jpeg" || frameFormat === "png"
               ? 16 * 1024 * 1024
               : Math.max(1024, frameWidth * frameHeight * 4 + 4096),
           });
@@ -756,7 +764,7 @@ async function ensureEditorServer() {
             res.end(JSON.stringify({ ok: false, error: "Frame export job already finalized" }));
             return;
           }
-          if (String(job.frameFormat || "raw") === "jpeg") {
+          if (String(job.frameFormat || "raw") === "jpeg" || String(job.frameFormat || "raw") === "png") {
             const frameBuffer = await readRequestBodyBuffer(req, Math.max(8 * 1024 * 1024, Number(job.frameMaxBytes || 0)));
             enqueueFrameBufferToJob(job, frameBuffer);
           } else {

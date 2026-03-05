@@ -58,6 +58,7 @@ const renderFpsValueInput = document.getElementById("renderFpsValueInput");
 const TIMELINE_LABEL_COL_PX = 64;
 
 let importedVideoUrl = "";
+let importedVideoBlob = null;
 let rafId = 0;
 let isSeeking = false;
 let previewFrameCanvas = null;
@@ -526,7 +527,9 @@ function toggleRenderSettingsPopover(show) {
 
 function normalizeRenderFrameTransport(value) {
   const raw = String(value || "png").toLowerCase();
-  return raw === "jpeg" ? "jpeg" : "png";
+  if (raw === "raw") return "raw";
+  if (raw === "jpeg") return "jpeg";
+  return "png";
 }
 
 function normalizeRenderFpsMode(value) {
@@ -2466,22 +2469,42 @@ async function exportFinalVideo() {
   try {
     exportVideo = document.createElement("video");
     let sourceUrl = videoEl.currentSrc || videoEl.src;
-    if (isDesktopAutoloadVideoSource()) {
-      setStatus("Preparing seek-optimized source for deterministic export...");
-      const mezzResp = await fetch("/__desktop/export/mezzanine/start", {
+    setStatus("Preparing seek-optimized source for deterministic export...");
+    const usingDesktopSource = isDesktopAutoloadVideoSource();
+    let mezzResp = null;
+    if (usingDesktopSource) {
+      mezzResp = await fetch("/__desktop/export/mezzanine/start", {
         method: "POST",
         headers: { "Content-Type": "application/json; charset=utf-8" },
         body: JSON.stringify({}),
       });
-      if (!mezzResp.ok) {
-        throw new Error(`Could not build mezzanine source (${mezzResp.status})`);
+    } else {
+      const sourceBlob = importedVideoBlob
+        ? importedVideoBlob
+        : await (async () => {
+          const sourceResp = await fetch(sourceUrl);
+          if (!sourceResp.ok) {
+            throw new Error(`Could not read loaded source video (${sourceResp.status})`);
+          }
+          return await sourceResp.blob();
+        })();
+      if (!sourceBlob || sourceBlob.size <= 0) {
+        throw new Error("Loaded source video is empty");
       }
-      const mezzJson = await mezzResp.json();
-      mezzanineId = String(mezzJson?.mezzanineId || "");
-      sourceUrl = String(mezzJson?.url || "");
-      if (!mezzanineId || !sourceUrl) {
-        throw new Error("Desktop did not return valid mezzanine source");
-      }
+      mezzResp = await fetch("/__desktop/export/mezzanine/start", {
+        method: "POST",
+        headers: { "Content-Type": sourceBlob.type || "application/octet-stream" },
+        body: sourceBlob,
+      });
+    }
+    if (!mezzResp.ok) {
+      throw new Error(`Could not build mezzanine source (${mezzResp.status})`);
+    }
+    const mezzJson = await mezzResp.json();
+    mezzanineId = String(mezzJson?.mezzanineId || "");
+    sourceUrl = String(mezzJson?.url || "");
+    if (!mezzanineId || !sourceUrl) {
+      throw new Error("Desktop did not return valid mezzanine source");
     }
     exportVideo.src = sourceUrl;
     exportVideo.playsInline = true;
@@ -2688,6 +2711,56 @@ async function seekVideoForFrame(video, sec) {
   await waitForMediaEvent(video, "seeked");
 }
 
+async function waitForNextDecodedVideoFrame(video, timeoutMs = 12000) {
+  if (video && typeof video.requestVideoFrameCallback === "function") {
+    await new Promise((resolve, reject) => {
+      let done = false;
+      let timer = 0;
+      let callbackId = 0;
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        if (timer) window.clearTimeout(timer);
+        if (err) reject(err);
+        else resolve();
+      };
+      timer = window.setTimeout(() => {
+        if (!done && typeof video.cancelVideoFrameCallback === "function" && callbackId) {
+          video.cancelVideoFrameCallback(callbackId);
+        }
+        finish(new Error("Timed out waiting for decoded video frame"));
+      }, Math.max(250, Number(timeoutMs || 0)));
+      callbackId = video.requestVideoFrameCallback(() => finish());
+    });
+    return;
+  }
+  await waitForMediaEvent(video, "timeupdate");
+}
+
+async function advanceVideoToTimeByDecoding(video, targetSec) {
+  const target = Math.max(0, Number(targetSec || 0));
+  if (Number(video.currentTime || 0) + 0.0005 >= target) return;
+  const prevRate = Number(video.playbackRate || 1);
+  video.muted = true;
+  video.playbackRate = 16;
+  try {
+    let guard = 0;
+    if (video.paused) {
+      await video.play();
+    }
+    while (Number(video.currentTime || 0) + 0.0005 < target) {
+      await waitForNextDecodedVideoFrame(video, 12000);
+      guard += 1;
+      if (guard > 20000) {
+        throw new Error("Video decode stepping exceeded guard limit");
+      }
+    }
+  } finally {
+    video.pause();
+    video.playbackRate = prevRate;
+  }
+}
+
 function disposeVideoElement(video) {
   if (!video) return;
   try {
@@ -2715,7 +2788,11 @@ async function tryDesktopDeterministicFrameExport({
   const fps = fpsMode === "custom"
     ? normalizeRenderFpsValue(project.renderFpsValue)
     : await preferredDeterministicFps(exportVideo);
-  const frameMimeType = frameFormat === "jpeg" ? "image/jpeg" : "image/png";
+  const frameMimeType = frameFormat === "jpeg"
+    ? "image/jpeg"
+    : frameFormat === "png"
+      ? "image/png"
+      : "application/octet-stream";
   const frameEncodeQuality = frameFormat === "jpeg" ? 0.95 : undefined;
   const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
@@ -2786,7 +2863,7 @@ async function tryDesktopDeterministicFrameExport({
       perf.uploadHttpMs += Math.max(0, performance.now() - uploadStart);
       perf.uploadCount += 1;
     };
-    const MAX_IN_FLIGHT = 2;
+    const MAX_IN_FLIGHT = frameFormat === "raw" ? 1 : 2;
     const inFlightUploads = new Set();
     let uploadError = null;
     const waitForFreeUploadSlot = async () => {
@@ -2814,9 +2891,17 @@ async function tryDesktopDeterministicFrameExport({
     setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
     const CHUNK_FRAMES = 120;
     let currentVideo = exportVideo;
+    const canDecodeStep = typeof currentVideo.requestVideoFrameCallback === "function";
+    let decodeStepFailed = false;
+    if (canDecodeStep) {
+      const initSeekStart = performance.now();
+      await seekVideoForFrame(currentVideo, trimStartSec);
+      perf.seekMs += Math.max(0, performance.now() - initSeekStart);
+    }
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
       const targetSec = trimStartSec + (frameIndex / fps);
-      if (frameIndex > 0 && frameIndex % CHUNK_FRAMES === 0) {
+      const usingSeekMode = !canDecodeStep || decodeStepFailed;
+      if (usingSeekMode && frameIndex > 0 && frameIndex % CHUNK_FRAMES === 0) {
         const rebuildStart = performance.now();
         const nextVideo = await createChunkVideoAt(targetSec);
         if (currentVideo !== exportVideo) {
@@ -2828,7 +2913,20 @@ async function tryDesktopDeterministicFrameExport({
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
       const seekStart = performance.now();
-      await seekVideoForFrame(currentVideo, targetSec);
+      if (!usingSeekMode) {
+        if (frameIndex > 0) {
+          try {
+            await advanceVideoToTimeByDecoding(currentVideo, targetSec);
+          } catch (err) {
+            decodeStepFailed = true;
+            console.warn("[export-perf] decode-step disabled, falling back to seek mode:", err?.message || String(err));
+            setStatus("Deterministic export: decode-stepping unavailable, using seek fallback...");
+            await seekVideoForFrame(currentVideo, targetSec);
+          }
+        }
+      } else {
+        await seekVideoForFrame(currentVideo, targetSec);
+      }
       perf.seekMs += Math.max(0, performance.now() - seekStart);
 
       const renderMs = targetSec * 1000;
@@ -2836,7 +2934,13 @@ async function tryDesktopDeterministicFrameExport({
       renderExportFrame(exportCtx, currentVideo, renderMs, width, height);
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
-      const encodedFrame = await canvasToBlob(exportCanvas, frameMimeType, frameEncodeQuality);
+      let encodedFrame = null;
+      if (frameFormat === "raw") {
+        const pixels = exportCtx.getImageData(0, 0, width, height);
+        encodedFrame = pixels.data;
+      } else {
+        encodedFrame = await canvasToBlob(exportCanvas, frameMimeType, frameEncodeQuality);
+      }
       perf.encodeMs += Math.max(0, performance.now() - encodeStart);
       await waitForFreeUploadSlot();
       const trackedUpload = uploadFrame(encodedFrame, frameIndex).catch((err) => {
@@ -3180,18 +3284,20 @@ async function restoreDraftSession() {
     }
   }
 
-  if (videoDraft && typeof videoDraft === "object") {
-    if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(importedVideoUrl);
-    }
-    if (videoDraft.kind === "blob" && videoDraft.blob instanceof Blob) {
-      importedVideoUrl = URL.createObjectURL(videoDraft.blob);
-      attachCurrentVideoToPlayer("Restored previous editor session.");
-    } else if (videoDraft.kind === "url" && typeof videoDraft.url === "string" && videoDraft.url) {
-      const cacheBust = videoDraft.url.includes("?") ? "&" : "?";
-      importedVideoUrl = `${videoDraft.url}${cacheBust}t=${Date.now()}`;
-      attachCurrentVideoToPlayer("Restored previous editor session.");
-    }
+    if (videoDraft && typeof videoDraft === "object") {
+      if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(importedVideoUrl);
+      }
+      if (videoDraft.kind === "blob" && videoDraft.blob instanceof Blob) {
+        importedVideoBlob = videoDraft.blob;
+        importedVideoUrl = URL.createObjectURL(videoDraft.blob);
+        attachCurrentVideoToPlayer("Restored previous editor session.");
+      } else if (videoDraft.kind === "url" && typeof videoDraft.url === "string" && videoDraft.url) {
+        importedVideoBlob = null;
+        const cacheBust = videoDraft.url.includes("?") ? "&" : "?";
+        importedVideoUrl = `${videoDraft.url}${cacheBust}t=${Date.now()}`;
+        attachCurrentVideoToPlayer("Restored previous editor session.");
+      }
   }
 
   if (projectDraft) saveProjectBtn.disabled = false;
@@ -3224,6 +3330,7 @@ async function tryDesktopAutoLoad() {
     if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(importedVideoUrl);
     }
+    importedVideoBlob = null;
     importedVideoUrl = `/__desktop/latest.video?t=${Date.now()}`;
     attachCurrentVideoToPlayer();
     saveProjectBtn.disabled = false;
@@ -3253,6 +3360,7 @@ loadVideoInput.addEventListener("change", async (e) => {
   if (importedVideoUrl && importedVideoUrl.startsWith("blob:")) {
     URL.revokeObjectURL(importedVideoUrl);
   }
+  importedVideoBlob = file;
   importedVideoUrl = URL.createObjectURL(file);
   attachCurrentVideoToPlayer();
   await persistDraftVideoSource({

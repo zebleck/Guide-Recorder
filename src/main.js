@@ -734,7 +734,11 @@ async function ensureEditorServer() {
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "superfast",
+            "-tune",
+            "zerolatency",
+            "-x264-params",
+            "bframes=0:rc-lookahead=0:sync-lookahead=0",
             "-crf",
             "18",
             "-pix_fmt",
@@ -969,20 +973,38 @@ async function ensureEditorServer() {
       if (pathname === "/__desktop/export/mezzanine/start" && req.method === "POST") {
         let tmpDir = "";
         try {
-          if (!latestSaved.videoPath) {
-            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({ ok: false, error: "No source recording available" }));
-            return;
+          const contentType = String(req.headers["content-type"] || "").toLowerCase();
+          const usingJsonSource = contentType.includes("application/json") || contentType === "";
+          let sourceVideoPath = "";
+          if (usingJsonSource) {
+            if (!latestSaved.videoPath) {
+              res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ ok: false, error: "No source recording available" }));
+              return;
+            }
+            sourceVideoPath = latestSaved.videoPath;
+            tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-mezzanine-"));
+          } else {
+            tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-mezzanine-"));
+            const sourceExt = contentType.includes("mp4")
+              ? ".mp4"
+              : contentType.includes("webm")
+                ? ".webm"
+                : ".bin";
+            sourceVideoPath = path.join(tmpDir, `source${sourceExt}`);
+            const uploadedBytes = await writeRequestBodyToFile(req, sourceVideoPath, 2 * 1024 * 1024 * 1024);
+            if (!(uploadedBytes > 0)) {
+              throw new Error("Uploaded source video is empty");
+            }
           }
           await verifyFfmpegAvailable();
-          const probedFps = await probeVideoFps(latestSaved.videoPath).catch(() => 60);
+          const probedFps = await probeVideoFps(sourceVideoPath).catch(() => 60);
           const targetFps = Math.max(1, Math.min(240, Number(probedFps || 60)));
-          tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-mezzanine-"));
           const outputPath = path.join(tmpDir, "mezzanine.mp4");
           const args = [
             "-y",
             "-i",
-            latestSaved.videoPath,
+            sourceVideoPath,
             "-map",
             "0:v:0",
             "-c:v",
@@ -1257,6 +1279,55 @@ async function readRequestBodyBuffer(req, maxBytes = 10 * 1024 * 1024) {
     req.on("error", reject);
   });
   return Buffer.concat(chunks);
+}
+
+async function writeRequestBodyToFile(req, filePath, maxBytes = 2 * 1024 * 1024 * 1024) {
+  const max = Math.max(1, Number(maxBytes || 0));
+  const out = fsNative.createWriteStream(filePath);
+  let total = 0;
+  await new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onReqErr);
+      out.off("error", onOutErr);
+      out.off("drain", onDrain);
+      if (err) {
+        out.destroy();
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+    const onReqErr = (err) => finish(err);
+    const onOutErr = (err) => finish(err);
+    const onDrain = () => {
+      if (!done) req.resume();
+    };
+    const onData = (chunk) => {
+      if (done) return;
+      total += chunk.length;
+      if (total > max) {
+        finish(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      const ok = out.write(chunk);
+      if (!ok) req.pause();
+    };
+    const onEnd = () => {
+      out.end(() => finish());
+    };
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onReqErr);
+    out.once("error", onOutErr);
+    out.on("drain", onDrain);
+  });
+  return total;
 }
 
 function enqueueFrameBufferToJob(job, buffer) {

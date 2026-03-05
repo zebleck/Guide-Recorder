@@ -1911,26 +1911,6 @@ function ffmpegFilterPath(value) {
     .replace(/'/g, "\\'");
 }
 
-function buildCursorSendcmdScript(track, cursorHotspotX, cursorHotspotY, trimDurationSec) {
-  if (!Array.isArray(track) || !track.length) return "";
-  const lines = [];
-  for (let i = 0; i < track.length; i += 1) {
-    const kf = track[i];
-    const next = i + 1 < track.length ? track[i + 1] : null;
-    const startT = Math.max(0, Number(kf?.tSec || 0));
-    const endRaw = Number(next?.tSec ?? trimDurationSec);
-    const endT = Math.max(startT + 0.0005, Math.min(trimDurationSec, endRaw));
-    if (!(endT > startT)) continue;
-    const x = Number((Math.max(0, Number(kf?.x || 0) - cursorHotspotX)).toFixed(4));
-    const y = Number((Math.max(0, Number(kf?.y || 0) - cursorHotspotY)).toFixed(4));
-    lines.push(
-      `${startT.toFixed(6)}-${endT.toFixed(6)} `
-      + `overlay@cursor x '${x}',`
-      + `overlay@cursor y '${y}';`
-    );
-  }
-  return lines.join("\n");
-}
 
 function catmullRom1dBackend(p0, p1, p2, p3, u) {
   const u2 = u * u;
@@ -2188,6 +2168,51 @@ function generateClickEffectsOverlay(clicks, dims, fps, durationSec, tmpDir) {
   });
 }
 
+async function generateTextOverlayVideo(manifest, dims, fps, trimStartSec, trimDurationSec, tmpDir) {
+  const texts = Array.isArray(manifest?.texts) ? manifest.texts : [];
+  if (!texts.length) return null;
+  const adjusted = [];
+  for (const t of texts) {
+    const startSec = Math.max(0, Number(t.startSec || 0) - trimStartSec);
+    const endSec = Math.max(0, Number(t.endSec || 0) - trimStartSec);
+    if (!(endSec > startSec) || endSec < 0 || startSec > trimDurationSec) continue;
+    if (!String(t.value || "").trim()) continue;
+    adjusted.push({ ...t, startSec, endSec });
+  }
+  if (!adjusted.length) return null;
+
+  const outPath = path.join(tmpDir, "text_overlay.mov");
+  const renderScript = await fs.readFile(path.join(__dirname, "text-overlay-render.js"), "utf8");
+
+  const win = new BrowserWindow({
+    show: false,
+    width: 100,
+    height: 100,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+
+  try {
+    await win.loadURL("data:text/html,<!DOCTYPE html><html><body></body></html>");
+    await win.webContents.executeJavaScript(renderScript);
+    await win.webContents.executeJavaScript(
+      `renderTextOverlay(${JSON.stringify({
+        width: dims.width,
+        height: dims.height,
+        fps,
+        durationSec: trimDurationSec,
+        outPath,
+        texts: adjusted,
+      })})`
+    );
+    return outPath;
+  } finally {
+    win.destroy();
+  }
+}
+
 function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
   const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
   if (!zooms.length) return "1";
@@ -2324,9 +2349,10 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   }
   if (cropFilter) vfParts.push(cropFilter);
 
-  const clickFps = targetFps > 0 ? targetFps : 60;
+  const overlayFps = targetFps > 0 ? targetFps : 60;
+  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimStartSec, trimDurationSec, tmpDir);
   const clickOverlayPath = clickEvents.length
-    ? await generateClickEffectsOverlay(clickEvents, dims, clickFps, trimDurationSec, tmpDir)
+    ? await generateClickEffectsOverlay(clickEvents, dims, overlayFps, trimDurationSec, tmpDir)
     : null;
 
   const args = ["-y"];
@@ -2358,6 +2384,12 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
       nextInputIdx += 1;
     }
   }
+  let textInputIdx = -1;
+  if (textOverlayPath) {
+    textInputIdx = nextInputIdx;
+    args.push("-i", textOverlayPath);
+    nextInputIdx += 1;
+  }
   let clickInputIdx = -1;
   if (clickOverlayPath) {
     clickInputIdx = nextInputIdx;
@@ -2367,7 +2399,7 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   if (hasTrimEnd) {
     args.push("-to", trimEndSecRaw.toFixed(3));
   }
-  const needsFilterGraph = vfParts.length || cursorImagePath || clickOverlayPath;
+  const needsFilterGraph = vfParts.length || cursorImagePath || textOverlayPath || clickOverlayPath;
   if (needsFilterGraph) {
     const baseChain = vfParts.length ? vfParts.join(",") : "null";
     let graph = `[0:v]${baseChain}[basev]`;
@@ -2380,6 +2412,11 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
       graph += `;[${cursorIdx}:v]format=rgba,setpts=PTS-STARTPTS[cursorv]`;
       graph += `;[${lastLabel}][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[withcursor]`;
       lastLabel = "withcursor";
+    }
+    if (textInputIdx >= 0) {
+      graph += `;[${textInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[textsv]`;
+      graph += `;[${lastLabel}][textsv]overlay=0:0:format=auto:shortest=1[withtext]`;
+      lastLabel = "withtext";
     }
     if (clickInputIdx >= 0) {
       graph += `;[${clickInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[clicksv]`;

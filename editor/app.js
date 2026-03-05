@@ -75,6 +75,7 @@ let gpuZoomRenderer = null;
 let gpuZoomDisabled = false;
 let loopFadeFirstFrameCanvas = null;
 let loopFadeFirstFrameDims = "";
+let previewSourceFps = 30;
 const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
 const CURSOR_PREFS_STORAGE_KEY = "guide-recorder.cursor-prefs.v1";
 const EDITOR_DRAFT_DB_NAME = "guide-recorder-editor";
@@ -2034,7 +2035,21 @@ function backendPreviewCursorCacheKey(width, height, targetFps) {
 function selectedRenderFpsForPreview() {
   const fpsMode = normalizeRenderFpsMode(project.renderFpsMode);
   if (fpsMode === "custom") return normalizeRenderFpsValue(project.renderFpsValue);
-  return 60;
+  return Math.max(1, Math.min(240, Number(previewSourceFps || 30)));
+}
+
+async function refreshPreviewSourceFps() {
+  if (!videoEl?.src) return;
+  try {
+    const nextFps = await preferredDeterministicFps(videoEl);
+    if (Number.isFinite(nextFps) && nextFps > 0 && Math.abs(nextFps - previewSourceFps) > 0.001) {
+      previewSourceFps = Math.max(1, Math.min(240, nextFps));
+      invalidatePreviewCursorCaches();
+      if (videoEl.paused) renderOverlay();
+    }
+  } catch {
+    // ignore FPS probe failures for preview sampling
+  }
 }
 
 function buildBackendStyleCursorTrack(width, height) {
@@ -2081,7 +2096,8 @@ function buildBackendStyleCursorTrack(width, height) {
   } else if (mode === "raw") {
     keyframes = reduceCursorKeyframes(points, 280);
   } else if (mode === "linear") {
-    keyframes = reduceCursorKeyframes(points, 220);
+    const sampleFps = Math.max(12, Math.min(240, Math.round(Number(targetFps || 30))));
+    keyframes = sampleCursorTrackLinear(points, 1000 / sampleFps);
   } else {
     const guideHz = normalizeCursorSplineGuideHz(project.cursorSplineGuideHz);
     const stepMs = 1000 / Math.max(1, guideHz);
@@ -2103,7 +2119,7 @@ function buildBackendStyleCursorTrack(width, height) {
     if (!anchors.length) {
       keyframes = reduceCursorKeyframes(points, 220);
     } else {
-      const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
+      const sampleFps = Math.max(12, Math.min(240, Math.round(Number(targetFps || 30))));
       const sampleStepMs = 1000 / sampleFps;
       const startMs = Number(points[0].t || 0);
       const endMs = Number(points[points.length - 1].t || 0);
@@ -2118,7 +2134,7 @@ function buildBackendStyleCursorTrack(width, height) {
           type: "mouse_move",
         });
       }
-      keyframes = sampled.length ? reduceCursorKeyframes(sampled, 220) : reduceCursorKeyframes(points, 220);
+      keyframes = sampled.length ? sampled : sampleCursorTrackLinear(points, sampleStepMs);
     }
   }
 
@@ -3966,6 +3982,7 @@ function attachCurrentVideoToPlayer(statusText = "") {
     refreshActionButtons();
     renderEffectsTimeline();
     syncPlaybackUi();
+    void refreshPreviewSourceFps();
   };
   refreshActionButtons();
   if (statusText) setStatus(statusText);
@@ -4106,6 +4123,8 @@ if (renderFpsModeSelect) {
   renderFpsModeSelect.addEventListener("change", () => {
     project.renderFpsMode = normalizeRenderFpsMode(renderFpsModeSelect.value);
     syncRenderSettingsUi();
+    invalidatePreviewCursorCaches();
+    void refreshPreviewSourceFps();
     queueDraftProjectPersist();
   });
 }
@@ -4113,8 +4132,40 @@ if (renderFpsValueInput) {
   renderFpsValueInput.addEventListener("input", () => {
     project.renderFpsValue = normalizeRenderFpsValue(renderFpsValueInput.value);
     syncRenderSettingsUi();
+    invalidatePreviewCursorCaches();
+    if (videoEl.paused) renderOverlay();
     queueDraftProjectPersist();
   });
+}
+
+function sampleCursorTrackLinear(points, sampleStepMs) {
+  if (!Array.isArray(points) || !points.length) return [];
+  const startMs = Number(points[0].t || 0);
+  const endMs = Number(points[points.length - 1].t || 0);
+  const sampled = [];
+  let idx = 0;
+  for (let t = startMs; t <= endMs + 0.1; t += sampleStepMs) {
+    while (idx + 1 < points.length && Number(points[idx + 1].t || 0) <= t) idx += 1;
+    const prev = points[idx];
+    const next = idx + 1 < points.length ? points[idx + 1] : null;
+    if (!next || Number(next.t || 0) <= Number(prev.t || 0)) {
+      sampled.push({ t: Math.max(0, Math.min(endMs, t)), x: Number(prev.x || 0), y: Number(prev.y || 0), type: "mouse_move" });
+      continue;
+    }
+    const p = Math.max(0, Math.min(1, (t - Number(prev.t || 0)) / (Number(next.t || 0) - Number(prev.t || 0))));
+    sampled.push({
+      t: Math.max(0, Math.min(endMs, t)),
+      x: Number(prev.x || 0) + (Number(next.x || 0) - Number(prev.x || 0)) * p,
+      y: Number(prev.y || 0) + (Number(next.y || 0) - Number(prev.y || 0)) * p,
+      type: "mouse_move",
+    });
+  }
+  return sampled;
+}
+
+function invalidatePreviewCursorCaches() {
+  backendCursorTrackCache.key = "";
+  backendCursorTrackCache.keyframes = [];
 }
 if (timelineZoomRange) {
   timelineZoomRange.addEventListener("input", () => {
@@ -4271,6 +4322,7 @@ videoEl.addEventListener("loadedmetadata", () => {
   fitCanvasToVideo();
   syncPlaybackUi();
   renderEffectsTimeline();
+  void refreshPreviewSourceFps();
 });
 videoEl.addEventListener("ended", syncPlaybackUi);
 window.addEventListener("resize", fitCanvasToVideo);

@@ -2052,6 +2052,31 @@ function reduceKeyframes(points, maxCount) {
   return out;
 }
 
+function sampleLinearTrackBackend(points, sampleStepSec) {
+  if (!Array.isArray(points) || !points.length) return [];
+  const startSec = Number(points[0].tSec || 0);
+  const endSec = Number(points[points.length - 1].tSec || 0);
+  const sampled = [];
+  let idx = 0;
+  for (let t = startSec; t <= endSec + 0.0001; t += sampleStepSec) {
+    while (idx + 1 < points.length && Number(points[idx + 1].tSec || 0) <= t) idx += 1;
+    const prev = points[idx];
+    const next = idx + 1 < points.length ? points[idx + 1] : null;
+    if (!next || Number(next.tSec || 0) <= Number(prev.tSec || 0)) {
+      sampled.push({ tSec: Math.max(0, Math.min(endSec, t)), x: Number(prev.x || 0), y: Number(prev.y || 0), type: "mouse_move" });
+      continue;
+    }
+    const p = Math.max(0, Math.min(1, (t - Number(prev.tSec || 0)) / (Number(next.tSec || 0) - Number(prev.tSec || 0))));
+    sampled.push({
+      tSec: Math.max(0, Math.min(endSec, t)),
+      x: Number(prev.x || 0) + (Number(next.x || 0) - Number(prev.x || 0)) * p,
+      y: Number(prev.y || 0) + (Number(next.y || 0) - Number(prev.y || 0)) * p,
+      type: "mouse_move",
+    });
+  }
+  return sampled;
+}
+
 function cursorKeyframeBudget(trimDurationSec, targetFps, mode = "raw") {
   const fps = Math.max(1, Math.min(120, Number(targetFps || 30)));
   const sec = Math.max(1, Math.min(4 * 60 * 60, Number(trimDurationSec || 1)));
@@ -2117,11 +2142,13 @@ function buildCursorKeyframesBackend(manifest, dims, trimSegments, trimDurationS
   const points = buildPointerEventsForBackend(manifest, dims, trimSegments, trimDurationSec);
   if (!points.length) return [];
   const budget = cursorKeyframeBudget(trimDurationSec, targetFps, mode);
+  const sampleFps = Math.max(12, Math.min(240, Math.round(Number(targetFps || 30))));
+  const sampleStep = 1 / sampleFps;
   if (mode === "raw") {
     return reduceKeyframes(points, budget);
   }
   if (mode === "linear") {
-    return reduceKeyframes(points, budget);
+    return sampleLinearTrackBackend(points, sampleStep);
   }
 
   const guideHz = normalizeCursorSplineGuideHzBackend(manifest?.cursorSplineGuideHz);
@@ -2143,8 +2170,6 @@ function buildCursorKeyframesBackend(manifest, dims, trimSegments, trimDurationS
   }
   if (!anchors.length) return reduceKeyframes(points, budget);
 
-  const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
-  const sampleStep = 1 / sampleFps;
   const lastPointT = points.length ? points[points.length - 1].tSec : 0;
   const sampleEnd = Number.isFinite(trimDurationSec) ? trimDurationSec : lastPointT;
   const sampled = [];
@@ -2158,17 +2183,19 @@ function buildCursorKeyframesBackend(manifest, dims, trimSegments, trimDurationS
       type: "mouse_move",
     });
   }
-  if (!sampled.length) return reduceKeyframes(points, budget);
-  return reduceKeyframes(sampled, budget);
+  if (!sampled.length) return sampleLinearTrackBackend(points, sampleStep);
+  return sampled;
 }
 
 function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps, guideHz) {
   if (!points.length) return [];
+  const sampleFps = Math.max(12, Math.min(240, Math.round(Number(targetFps || 30))));
+  const sampleStep = 1 / sampleFps;
   if (mode === "raw") {
     return reduceKeyframes(points, 280);
   }
   if (mode === "linear") {
-    return reduceKeyframes(points, 220);
+    return sampleLinearTrackBackend(points, sampleStep);
   }
   const stepSec = 1 / Math.max(1, guideHz);
   const anchors = [];
@@ -2187,8 +2214,6 @@ function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps,
     }
   }
   if (!anchors.length) return reduceKeyframes(points, 220);
-  const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
-  const sampleStep = 1 / sampleFps;
   const lastPointT = points.length ? points[points.length - 1].tSec : 0;
   const sampleEnd = Number.isFinite(trimDurationSec) ? trimDurationSec : lastPointT;
   const sampled = [];
@@ -2202,7 +2227,7 @@ function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps,
       type: "mouse_move",
     });
   }
-  return sampled.length ? reduceKeyframes(sampled, 220) : reduceKeyframes(points, 220);
+  return sampled.length ? sampled : sampleLinearTrackBackend(points, sampleStep);
 }
 
 function buildCursorOverlayExpr(track, coord, hotspot, isRaw, registerIndex = 0) {

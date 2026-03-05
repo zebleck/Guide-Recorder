@@ -181,28 +181,37 @@
         <div class="effects-timeline" id="effectsTimeline">
           <div class="timeline-header">
             <span>Effects Timeline</span>
-            <span class="muted">Click to seek</span>
+            <div class="timeline-header-controls">
+              <label class="timeline-zoom-control" for="timelineZoomRange">
+                <span class="muted">Zoom</span>
+                <input id="timelineZoomRange" type="range" min="1" max="8" step="0.25" value="1" />
+                <span id="timelineZoomLabel" class="muted">1.0x</span>
+              </label>
+              <span class="muted">Click to seek</span>
+            </div>
           </div>
-          <div class="timeline-surface" id="timelineSurface">
-            <div class="timeline-lane">
-              <span class="timeline-name">Trim</span>
-              <div class="timeline-track" id="trimTrack"></div>
-            </div>
-            <div class="timeline-lane">
-              <span class="timeline-name">Zoom</span>
-              <div class="timeline-track" id="zoomTrack">
-                <span id="zoomGhost" class="timeline-ghost zoom hidden"></span>
-                <button id="zoomAddBtn" class="lane-add-btn" type="button" title="Add zoom">+</button>
+          <div class="timeline-viewport" id="timelineViewport">
+            <div class="timeline-surface" id="timelineSurface">
+              <div class="timeline-lane">
+                <span class="timeline-name">Trim</span>
+                <div class="timeline-track" id="trimTrack"></div>
               </div>
-            </div>
-            <div class="timeline-lane">
-              <span class="timeline-name">Text</span>
-              <div class="timeline-track" id="textTrack">
-                <span id="textGhost" class="timeline-ghost text hidden"></span>
-                <button id="textAddBtn" class="lane-add-btn" type="button" title="Add text">+</button>
+              <div class="timeline-lane">
+                <span class="timeline-name">Zoom</span>
+                <div class="timeline-track" id="zoomTrack">
+                  <span id="zoomGhost" class="timeline-ghost zoom hidden"></span>
+                  <button id="zoomAddBtn" class="lane-add-btn" type="button" title="Add zoom">+</button>
+                </div>
               </div>
+              <div class="timeline-lane">
+                <span class="timeline-name">Text</span>
+                <div class="timeline-track" id="textTrack">
+                  <span id="textGhost" class="timeline-ghost text hidden"></span>
+                  <button id="textAddBtn" class="lane-add-btn" type="button" title="Add text">+</button>
+                </div>
+              </div>
+              <div class="timeline-playhead" id="timelinePlayhead"></div>
             </div>
-            <div class="timeline-playhead" id="timelinePlayhead"></div>
           </div>
         </div>
       </section>

@@ -1987,12 +1987,14 @@ function buildCursorKeyframesBackend(manifest, dims, trimStartSec, trimDurationS
 
   const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
   const sampleStep = 1 / sampleFps;
+  const lastPointT = points.length ? points[points.length - 1].tSec : 0;
+  const sampleEnd = Number.isFinite(trimDurationSec) ? trimDurationSec : lastPointT;
   const sampled = [];
-  for (let t = 0; t <= trimDurationSec + 0.0001; t += sampleStep) {
+  for (let t = 0; t <= sampleEnd + 0.0001; t += sampleStep) {
     const pos = splineAtBackend(anchors, t);
     if (!pos) continue;
     sampled.push({
-      tSec: Math.max(0, Math.min(trimDurationSec, t)),
+      tSec: Math.max(0, Math.min(sampleEnd, t)),
       x: Math.max(0, Math.min(dims.width - 1, Math.round(pos.x))),
       y: Math.max(0, Math.min(dims.height - 1, Math.round(pos.y))),
       type: "mouse_move",
@@ -2029,12 +2031,14 @@ function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps,
   if (!anchors.length) return reduceKeyframes(points, 220);
   const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
   const sampleStep = 1 / sampleFps;
+  const lastPointT = points.length ? points[points.length - 1].tSec : 0;
+  const sampleEnd = Number.isFinite(trimDurationSec) ? trimDurationSec : lastPointT;
   const sampled = [];
-  for (let t = 0; t <= trimDurationSec + 0.0001; t += sampleStep) {
+  for (let t = 0; t <= sampleEnd + 0.0001; t += sampleStep) {
     const pos = splineAtBackend(anchors, t);
     if (!pos) continue;
     sampled.push({
-      tSec: Math.max(0, Math.min(trimDurationSec, t)),
+      tSec: Math.max(0, Math.min(sampleEnd, t)),
       x: Math.max(0, Math.min(dims.width - 1, Math.round(pos.x))),
       y: Math.max(0, Math.min(dims.height - 1, Math.round(pos.y))),
       type: "mouse_move",
@@ -2217,22 +2221,10 @@ function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
   const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
   if (!zooms.length) return "1";
 
-  // Heuristic: if zoom times exceed trimmed duration, treat them as absolute media timeline.
-  let hasBeyondTrimmedRange = false;
-  for (const z of zooms) {
-    const s = Number(z?.startSec || 0);
-    const e = Number(z?.endSec || 0);
-    if (s > trimDurationSec + 0.5 || e > trimDurationSec + 0.5) {
-      hasBeyondTrimmedRange = true;
-      break;
-    }
-  }
-  const baseShift = hasBeyondTrimmedRange ? trimStartSec : 0;
-
   const normalized = [];
   for (const z of zooms) {
-    const rawStart = Number(z?.startSec || 0) - baseShift;
-    const rawEnd = Number(z?.endSec || 0) - baseShift;
+    const rawStart = Number(z?.startSec || 0) - trimStartSec;
+    const rawEnd = Number(z?.endSec || 0) - trimStartSec;
     if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) continue;
     const startSec = Math.max(0, rawStart);
     const endSec = Math.min(trimDurationSec, rawEnd);
@@ -2319,7 +2311,8 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   if (!useCustomCursor) {
     for (let i = 0; i < pointerKeyframes.length; i += 1) {
       const kf = pointerKeyframes[i];
-      const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
+      const fallbackEnd = Number.isFinite(trimDurationSec) ? trimDurationSec : (pointerKeyframes.length ? pointerKeyframes[pointerKeyframes.length - 1].tSec + 1 : 1);
+      const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : fallbackEnd;
       if (!(nextT > kf.tSec)) continue;
       const x = Math.max(0, kf.x - cursorHalf);
       const y = Math.max(0, kf.y - cursorHalf);
@@ -2360,9 +2353,10 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   if (cropFilter) vfParts.push(cropFilter);
 
   const overlayFps = targetFps > 0 ? targetFps : 60;
-  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimStartSec, trimDurationSec, tmpDir);
+  const overlayDurationSec = Number.isFinite(trimDurationSec) ? trimDurationSec : effectiveDurationSec;
+  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimStartSec, overlayDurationSec, tmpDir);
   const clickOverlayPath = clickEvents.length
-    ? await generateClickEffectsOverlay(clickEvents, dims, overlayFps, trimDurationSec, tmpDir)
+    ? await generateClickEffectsOverlay(clickEvents, dims, overlayFps, overlayDurationSec, tmpDir)
     : null;
 
   const args = ["-y"];

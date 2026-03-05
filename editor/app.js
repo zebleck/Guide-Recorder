@@ -1859,6 +1859,7 @@ function backendPreviewCursorCacheKey(width, height, targetFps) {
   const evts = project.events;
   const last = evts.length ? evts[evts.length - 1] : null;
   const cb = project.captureBounds || {};
+  const range = trimRangeForDuration(sourceDurationSecFor(videoEl.duration));
   return [
     evts.length,
     Number(last?.t || 0).toFixed(3),
@@ -1873,6 +1874,8 @@ function backendPreviewCursorCacheKey(width, height, targetFps) {
     Number(cb.y || 0),
     Number(cb.width || 0),
     Number(cb.height || 0),
+    range.startSec.toFixed(3),
+    range.endSec.toFixed(3),
   ].join("|");
 }
 
@@ -1889,19 +1892,34 @@ function buildBackendStyleCursorTrack(width, height) {
 
   const mode = normalizeCursorMotionMode(project.cursorMotionMode);
   const evts = project.events;
+  const range = trimRangeForDuration(sourceDurationSecFor(videoEl.duration));
+  const trimStartMs = range.startSec * 1000;
+  const trimEndMs = range.endSec * 1000;
   const points = [];
+  let lastBeforeTrim = null;
   for (let i = 0; i < evts.length; i += 1) {
     const evt = evts[i];
     if (!isPointerEventType(evt?.type)) continue;
     if (evt.inFrame === false) continue;
     const pos = exportEventToPosition(evt, width, height);
     if (!pos) continue;
-    points.push({
-      t: Number(evt.t || 0),
+    const tMs = Number(evt.t || 0);
+    const pt = {
+      t: tMs,
       x: Math.max(0, Math.min(width - 1, Number(pos.x || 0))),
       y: Math.max(0, Math.min(height - 1, Number(pos.y || 0))),
       type: String(evt.type || ""),
-    });
+    };
+    if (tMs < trimStartMs) {
+      lastBeforeTrim = pt;
+      continue;
+    }
+    if (tMs > trimEndMs) break;
+    points.push(pt);
+  }
+  // Include the last event before trim start so interpolation starts correctly
+  if (lastBeforeTrim && (!points.length || points[0].t > trimStartMs)) {
+    points.unshift(lastBeforeTrim);
   }
   points.sort((a, b) => a.t - b.t);
 
@@ -1935,9 +1953,10 @@ function buildBackendStyleCursorTrack(width, height) {
     } else {
       const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
       const sampleStepMs = 1000 / sampleFps;
+      const startMs = Number(points[0].t || 0);
       const endMs = Number(points[points.length - 1].t || 0);
       const sampled = [];
-      for (let t = 0; t <= endMs + 0.1; t += sampleStepMs) {
+      for (let t = startMs; t <= endMs + 0.1; t += sampleStepMs) {
         const norm = splineNormAt(t, guideHz);
         if (!norm) continue;
         sampled.push({
@@ -2932,7 +2951,8 @@ function renderOverlay() {
   });
   // Loop-fade: capture first frame and crossfade at end
   const LOOP_FADE_SEC = 0.5;
-  const dimsKey = `${frame.width}x${frame.height}`;
+  const trimRange = trimRangeForDuration(sourceDurationSecFor(videoEl.duration));
+  const dimsKey = `${frame.width}x${frame.height}|${trimRange.startSec.toFixed(3)}|${trimRange.endSec.toFixed(3)}`;
   if (trimmedSec < 0.05 && dur > LOOP_FADE_SEC * 2) {
     if (!loopFadeFirstFrameCanvas || loopFadeFirstFrameDims !== dimsKey) {
       loopFadeFirstFrameCanvas = document.createElement("canvas");

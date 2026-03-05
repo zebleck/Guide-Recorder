@@ -607,7 +607,7 @@ async function ensureEditorServer() {
         const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-export-job-"));
         const outputPath = path.join(tmpDir, "final.mp4");
         try {
-          const manifest = await readJsonBody(req);
+          const manifest = await readJsonBody(req, LARGE_EXPORT_JSON_MAX_BYTES);
           await verifyFfmpegAvailable();
           const dims = await probeVideoDimensions(latestSaved.videoPath);
           const args = ffmpegArgsEditorExport(latestSaved.videoPath, outputPath, manifest, dims);
@@ -648,7 +648,7 @@ async function ensureEditorServer() {
         const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-backend-export-"));
         const outputPath = path.join(tmpDir, "final.mp4");
         try {
-          const manifest = await readJsonBody(req);
+          const manifest = await readJsonBody(req, LARGE_EXPORT_JSON_MAX_BYTES);
           await verifyFfmpegAvailable();
           const mezzanineId = String(manifest?.mezzanineId || "");
           let inputPath = latestSaved.videoPath;
@@ -1502,6 +1502,8 @@ async function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
   return raw ? JSON.parse(raw) : {};
 }
 
+const LARGE_EXPORT_JSON_MAX_BYTES = 64 * 1024 * 1024;
+
 async function transcodeWebmToMp4(inputPath, outputPath, requestedFps = 0) {
   await verifyFfmpegAvailable();
   let targetFps = requestedFps;
@@ -1626,6 +1628,41 @@ function aspectRatioForPreset(preset, sourceW, sourceH) {
   };
   if (!preset || preset === "source") return sourceW / Math.max(1, sourceH);
   return map[preset] || sourceW / Math.max(1, sourceH);
+}
+
+const CAMERA_DEADZONE_RATIO_BACKEND = 0.22;
+
+function evenFloorNumber(value) {
+  return Math.max(2, Math.floor(Number(value || 0) / 2) * 2);
+}
+
+function aspectViewportForPresetBackend(preset, sourceW, sourceH) {
+  const safeW = Math.max(1, Number(sourceW || 0));
+  const safeH = Math.max(1, Number(sourceH || 0));
+  const targetAspect = aspectRatioForPreset(preset, safeW, safeH);
+  const sourceAspect = safeW / Math.max(1, safeH);
+  if (Math.abs(targetAspect - sourceAspect) <= 0.0001) {
+    return {
+      sx: 0,
+      sy: 0,
+      sw: safeW,
+      sh: safeH,
+      outW: evenFloorNumber(safeW),
+      outH: evenFloorNumber(safeH),
+    };
+  }
+  let sw = safeW;
+  let sh = safeH;
+  if (targetAspect > sourceAspect) sh = safeW / targetAspect;
+  else sw = safeH * targetAspect;
+  return {
+    sx: (safeW - sw) / 2,
+    sy: (safeH - sh) / 2,
+    sw,
+    sh,
+    outW: evenFloorNumber(sw),
+    outH: evenFloorNumber(sh),
+  };
 }
 
 async function probeVideoDimensions(inputPath) {
@@ -2168,11 +2205,12 @@ function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps,
   return sampled.length ? reduceKeyframes(sampled, 220) : reduceKeyframes(points, 220);
 }
 
-function buildCursorOverlayExpr(track, coord, hotspot, isRaw) {
+function buildCursorOverlayExpr(track, coord, hotspot, isRaw, registerIndex = 0) {
   if (!track.length) return "0";
   const last = track[track.length - 1];
+  const reg = Math.max(0, Math.min(9, Math.floor(Number(registerIndex) || 0)));
   const defaultVal = Math.max(0, Number(last[coord]) - hotspot).toFixed(2);
-  const parts = [`st(0,${defaultVal})`];
+  const parts = [`st(${reg},${defaultVal})`];
   for (let i = 0; i < track.length - 1; i += 1) {
     const kf = track[i];
     const next = track[i + 1];
@@ -2181,15 +2219,177 @@ function buildCursorOverlayExpr(track, coord, hotspot, isRaw) {
     if (!(t1 > t0)) continue;
     const v0 = Math.max(0, Number(kf[coord]) - hotspot);
     if (isRaw) {
-      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(0,${v0.toFixed(2)}),0)`);
+      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(${reg},${v0.toFixed(2)}),0)`);
     } else {
       const v1 = Math.max(0, Number(next[coord]) - hotspot);
       const rate = (v1 - v0) / (t1 - t0);
-      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(0,${v0.toFixed(2)}+${rate.toFixed(4)}*(t-${t0.toFixed(4)})),0)`);
+      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(${reg},${v0.toFixed(2)}+${rate.toFixed(4)}*(t-${t0.toFixed(4)})),0)`);
     }
   }
-  parts.push("ld(0)");
+  parts.push(`ld(${reg})`);
   return parts.join(";");
+}
+
+function buildTrackValueExpr(track, coord, isRaw, offset = 0) {
+  if (!Array.isArray(track) || !track.length) return "0";
+  const first = track[0];
+  const last = track[track.length - 1];
+  const firstVal = Math.max(0, Number(first?.[coord] || 0) - Number(offset || 0));
+  const lastVal = Math.max(0, Number(last?.[coord] || 0) - Number(offset || 0));
+  const parts = [];
+  if (track.length === 1) return firstVal.toFixed(4);
+  parts.push(`if(lt(t,${Number(track[1]?.tSec || 0).toFixed(4)}),${firstVal.toFixed(4)},0)`);
+  for (let i = 0; i < track.length - 1; i += 1) {
+    const cur = track[i];
+    const next = track[i + 1];
+    const t0 = Number(cur?.tSec || 0);
+    const t1 = Number(next?.tSec || 0);
+    const v0 = Math.max(0, Number(cur?.[coord] || 0) - Number(offset || 0));
+    const v1 = Math.max(0, Number(next?.[coord] || 0) - Number(offset || 0));
+    if (!(t1 > t0)) continue;
+    const segExpr = isRaw
+      ? `${v0.toFixed(4)}`
+      : `(${v0.toFixed(4)}+${((v1 - v0) / (t1 - t0)).toFixed(6)}*(t-${t0.toFixed(4)}))`;
+    parts.push(`if(gte(t,${t0.toFixed(4)})*lt(t,${t1.toFixed(4)}),${segExpr},0)`);
+  }
+  parts.push(`if(gte(t,${Number(last.tSec || 0).toFixed(4)}),${lastVal.toFixed(4)},0)`);
+  return parts.join("+");
+}
+
+function normalizeBackendZoomSpans(manifest, trimSegments, trimDurationSec) {
+  const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
+  const normalized = [];
+  for (const z of zooms) {
+    const spans = remapSourceIntervalToEditedSegments(Number(z?.startSec || 0), Number(z?.endSec || 0), trimSegments);
+    for (const span of spans) {
+      const startSec = Math.max(0, span.startSec);
+      const endSec = Math.min(trimDurationSec, span.endSec);
+      if (!(endSec > startSec)) continue;
+      const durSec = endSec - startSec;
+      const targetScale = Math.max(1, Number(z?.scale || 1));
+      const easeSecRaw = Math.max(0, Number(z?.easeMs || 0)) / 1000;
+      const easeSec = Math.min(easeSecRaw, durSec * 0.5);
+      normalized.push({ startSec, endSec, targetScale, easeSec });
+    }
+  }
+  normalized.sort((a, b) => a.startSec - b.startSec);
+  return normalized;
+}
+
+function activeZoomScaleAtSecBackend(normalizedZooms, tSec) {
+  for (let i = 0; i < normalizedZooms.length; i += 1) {
+    const z = normalizedZooms[i];
+    if (tSec < z.startSec || tSec > z.endSec) continue;
+    let factor = z.targetScale;
+    if (z.easeSec > 0.0005) {
+      const inSec = tSec - z.startSec;
+      const outSec = z.endSec - tSec;
+      if (inSec < z.easeSec) factor = 1 + (z.targetScale - 1) * (inSec / z.easeSec);
+      if (outSec < z.easeSec) factor = 1 + (z.targetScale - 1) * (outSec / z.easeSec);
+    }
+    return factor;
+  }
+  return 1;
+}
+
+function pointerAtSecFromTrack(track, tSec) {
+  if (!Array.isArray(track) || !track.length) return null;
+  let lo = 0;
+  let hi = track.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (Number(track[mid].tSec || 0) <= tSec) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best < 0) return { x: Number(track[0].x || 0), y: Number(track[0].y || 0), inFrame: true };
+  if (best >= track.length - 1) {
+    return { x: Number(track[best].x || 0), y: Number(track[best].y || 0), inFrame: true };
+  }
+  const prev = track[best];
+  const next = track[best + 1];
+  const t0 = Number(prev.tSec || 0);
+  const t1 = Number(next.tSec || 0);
+  if (!(t1 > t0)) return { x: Number(prev.x || 0), y: Number(prev.y || 0), inFrame: true };
+  const p = Math.max(0, Math.min(1, (tSec - t0) / (t1 - t0)));
+  return {
+    x: Number(prev.x || 0) + (Number(next.x || 0) - Number(prev.x || 0)) * p,
+    y: Number(prev.y || 0) + (Number(next.y || 0) - Number(prev.y || 0)) * p,
+    inFrame: true,
+  };
+}
+
+function buildZoomViewportTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps) {
+  const viewport = aspectViewportForPresetBackend(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
+  const pointerTrack = buildCursorCommandTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps);
+  const normalizedZooms = normalizeBackendZoomSpans(manifest, trimSegments, trimDurationSec);
+  const sampleFps = Math.max(12, Math.min(30, Math.round(Number(targetFps || 30))));
+  const sampleStep = 1 / sampleFps;
+  const samples = [];
+  for (let tSec = 0; tSec <= trimDurationSec + 0.0001; tSec += sampleStep) {
+    const factor = activeZoomScaleAtSecBackend(normalizedZooms, tSec);
+    const sw = viewport.sw / factor;
+    const sh = viewport.sh / factor;
+    let sx = (Number(dims.width || 0) - sw) / 2;
+    let sy = (Number(dims.height || 0) - sh) / 2;
+    const pointer = pointerAtSecFromTrack(pointerTrack, Math.min(trimDurationSec, tSec));
+    if (pointer?.inFrame) {
+      const px = Number(pointer.x || 0);
+      const py = Number(pointer.y || 0);
+      const deadX = Math.max(1, sw * CAMERA_DEADZONE_RATIO_BACKEND);
+      const deadY = Math.max(1, sh * CAMERA_DEADZONE_RATIO_BACKEND);
+      const leftEdge = sx + deadX;
+      const rightEdge = sx + sw - deadX;
+      const topEdge = sy + deadY;
+      const bottomEdge = sy + sh - deadY;
+      if (px < leftEdge) sx = px - deadX;
+      else if (px > rightEdge) sx = px + deadX - sw;
+      if (py < topEdge) sy = py - deadY;
+      else if (py > bottomEdge) sy = py + deadY - sh;
+    }
+    sx = Math.max(0, Math.min(Number(dims.width || 0) - sw, sx));
+    sy = Math.max(0, Math.min(Number(dims.height || 0) - sh, sy));
+    samples.push({
+      tSec: Math.max(0, Math.min(trimDurationSec, tSec)),
+      x: sx * factor,
+      y: sy * factor,
+    });
+  }
+  return reduceKeyframes(samples, 120);
+}
+
+function buildBackendZoomViewportFilter(manifest, dims, trimSegments, trimDurationSec, targetFps) {
+  const preset = String(manifest?.aspectPreset || "source");
+  const viewport = aspectViewportForPresetBackend(preset, dims.width, dims.height);
+  const factorExpr = buildBackendZoomScaleExpr(manifest, trimSegments, trimDurationSec);
+  const viewportTrack = buildZoomViewportTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps);
+
+  const zoomedWExpr = `trunc(iw*(${factorExpr})/2)*2`;
+  const zoomedHExpr = `trunc(ih*(${factorExpr})/2)*2`;
+  const outW = viewport.outW;
+  const outH = viewport.outH;
+  const centerXExpr = `(iw-ow)/2`;
+  const centerYExpr = `(ih-oh)/2`;
+  if (!viewportTrack.length) {
+    return {
+      filter: `scale=w='${zoomedWExpr}':h='${zoomedHExpr}':eval=frame,crop=w=${outW}:h=${outH}:x='${centerXExpr}':y='${centerYExpr}'`,
+      outputWidth: outW,
+      outputHeight: outH,
+    };
+  }
+
+  const cropXExpr = buildTrackValueExpr(viewportTrack, "x", false, 0);
+  const cropYExpr = buildTrackValueExpr(viewportTrack, "y", false, 0);
+
+  return {
+    filter: `scale=w='${zoomedWExpr}':h='${zoomedHExpr}':eval=frame,crop=w=${outW}:h=${outH}:x='${cropXExpr}':y='${cropYExpr}'`,
+    outputWidth: outW,
+    outputHeight: outH,
+  };
 }
 
 function buildCursorCommandTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps) {
@@ -2398,16 +2598,6 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     effectiveDurationSec = sourceDurationSec > 0 ? sourceDurationSec : 0;
   }
   const loopFadeSec = 0.5;
-  const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
-  const sourceAspect = dims.width / Math.max(1, dims.height);
-  let cropFilter = "";
-  if (Math.abs(targetAspect - sourceAspect) > 0.0001) {
-    if (targetAspect > sourceAspect) {
-      cropFilter = `crop=iw:trunc(iw/${targetAspect}/2)*2:(iw-trunc(iw/${targetAspect}/2)*2)/2`;
-    } else {
-      cropFilter = `crop=trunc(ih*${targetAspect}/2)*2:ih:(iw-trunc(ih*${targetAspect}/2)*2)/2:0`;
-    }
-  }
 
   const eventList = Array.isArray(manifest?.events) ? manifest.events : [];
   const parsedCursor = parseDataUrlImage(manifest?.cursorTextureDataUrl);
@@ -2471,20 +2661,14 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     if (clickEvents.length >= 800) break;
   }
 
-  const vfParts = [];
-  if (overlayFilters.length) vfParts.push(...overlayFilters);
-  const zoomScaleExpr = buildBackendZoomScaleExpr(manifest, trimSegments, trimDurationSec);
-  if (zoomScaleExpr !== "1") {
-    vfParts.push(
-      `crop=w='trunc(iw/(${zoomScaleExpr})/2)*2':h='trunc(ih/(${zoomScaleExpr})/2)*2':x='(iw-ow)/2':y='(ih-oh)/2'`,
-      `scale=${Math.max(2, Math.round(Number(dims.width || 0)))}:${Math.max(2, Math.round(Number(dims.height || 0)))}`
-    );
-  }
-  if (cropFilter) vfParts.push(cropFilter);
+  const zoomViewportFilter = buildBackendZoomViewportFilter(manifest, dims, trimSegments, trimDurationSec, targetFps > 0 ? targetFps : 60);
+  const renderDims = zoomViewportFilter
+    ? { width: zoomViewportFilter.outputWidth, height: zoomViewportFilter.outputHeight }
+    : { width: Math.max(2, Math.round(Number(dims.width || 0))), height: Math.max(2, Math.round(Number(dims.height || 0))) };
 
   const overlayFps = targetFps > 0 ? targetFps : 60;
   const overlayDurationSec = effectiveDurationSec;
-  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimSegments, overlayDurationSec, tmpDir);
+  const textOverlayPath = await generateTextOverlayVideo(manifest, renderDims, overlayFps, trimSegments, overlayDurationSec, tmpDir);
   const clickOverlayPath = clickEvents.length
     ? await generateClickEffectsOverlay(clickEvents, dims, overlayFps, overlayDurationSec, tmpDir)
     : null;
@@ -2526,7 +2710,7 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     args.push("-i", clickOverlayPath);
     nextInputIdx += 1;
   }
-  const needsFilterGraph = requiresTrimGraph || vfParts.length || cursorImagePath || textOverlayPath || clickOverlayPath;
+  const needsFilterGraph = requiresTrimGraph || overlayFilters.length || Boolean(zoomViewportFilter?.filter) || cursorImagePath || textOverlayPath || clickOverlayPath;
   if (needsFilterGraph) {
     const graphParts = [];
     let baseVideoLabel = "0:v";
@@ -2565,9 +2749,9 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
         if (hasAudio) baseAudioLabel = "trima";
       }
     }
-    const baseChain = vfParts.length ? vfParts.join(",") : "null";
-    let graph = `${graphParts.join(";")}${graphParts.length ? ";" : ""}[${baseVideoLabel}]${baseChain}[basev]`;
-    let lastLabel = "basev";
+    const preZoomChain = overlayFilters.length ? overlayFilters.join(",") : "null";
+    let graph = `${graphParts.join(";")}${graphParts.length ? ";" : ""}[${baseVideoLabel}]${preZoomChain}[prezoomv]`;
+    let lastLabel = "prezoomv";
     if (cursorImagePath && cursorCommandTrack.length > 0) {
       const cursorIdx = 1;
       const isRaw = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode) === "raw";
@@ -2577,15 +2761,19 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
       graph += `;[${lastLabel}][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[withcursor]`;
       lastLabel = "withcursor";
     }
-    if (textInputIdx >= 0) {
-      graph += `;[${textInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[textsv]`;
-      graph += `;[${lastLabel}][textsv]overlay=0:0:format=auto:shortest=1[withtext]`;
-      lastLabel = "withtext";
-    }
     if (clickInputIdx >= 0) {
       graph += `;[${clickInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[clicksv]`;
       graph += `;[${lastLabel}][clicksv]overlay=0:0:format=auto:shortest=1[withclicks]`;
       lastLabel = "withclicks";
+    }
+    if (zoomViewportFilter?.filter) {
+      graph += `;[${lastLabel}]${zoomViewportFilter.filter}[withzoom]`;
+      lastLabel = "withzoom";
+    }
+    if (textInputIdx >= 0) {
+      graph += `;[${textInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[textsv]`;
+      graph += `;[${lastLabel}][textsv]overlay=0:0:format=auto:shortest=1[withtext]`;
+      lastLabel = "withtext";
     }
     // Loop-fade: crossfade end of video into the first frame
     const canLoopFade = effectiveDurationSec > loopFadeSec * 2;

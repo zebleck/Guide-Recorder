@@ -132,6 +132,7 @@ let draftPersistTimer = 0;
 let lastPointerClientX = 0;
 let lastPointerClientY = 0;
 let lastHoveredSegmentRef = null;
+let trimSplitHover = null;
 const timelineHistory = {
   past: [],
   future: [],
@@ -159,6 +160,7 @@ const project = {
   cursorMotionMode: "raw",
   cursorSplineGuideHz: 18,
   aspectPreset: "source",
+  trimSegments: [],
   trimStartSec: 0,
   trimEndSec: 0,
   renderFrameTransport: "png",
@@ -173,6 +175,7 @@ function setStatus(msg) {
 
 function captureTimelineState() {
   return {
+    trimSegments: JSON.parse(JSON.stringify(Array.isArray(project.trimSegments) ? project.trimSegments : [])),
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
     zooms: JSON.parse(JSON.stringify(Array.isArray(project.zooms) ? project.zooms : [])),
@@ -201,6 +204,7 @@ function applyTimelineState(state) {
   if (!state || timelineHistory.isApplying) return false;
   timelineHistory.isApplying = true;
   try {
+    project.trimSegments = JSON.parse(JSON.stringify(Array.isArray(state.trimSegments) ? state.trimSegments : []));
     project.trimStartSec = Number(state.trimStartSec || 0);
     project.trimEndSec = Number(state.trimEndSec || 0);
     project.zooms = JSON.parse(JSON.stringify(Array.isArray(state.zooms) ? state.zooms : []));
@@ -462,18 +466,59 @@ function sourceDurationSecFor(sourceDuration) {
 
 function trimRangeForDuration(sourceDuration) {
   const maxSec = Math.max(0, Number(sourceDuration || 0));
-  const start = Math.max(0, Math.min(maxSec, Number(project.trimStartSec || 0)));
-  const endRaw = Number(project.trimEndSec || 0);
-  const end = endRaw > 0 ? Math.max(start, Math.min(maxSec, endRaw)) : maxSec;
-  return { startSec: start, endSec: end, durationSec: Math.max(0, end - start) };
+  const rawSegments = Array.isArray(project.trimSegments) && project.trimSegments.length
+    ? project.trimSegments
+    : [{ startSec: Number(project.trimStartSec || 0), endSec: Number(project.trimEndSec || 0) || maxSec }];
+  const normalized = [];
+  for (const raw of rawSegments) {
+    const start = Math.max(0, Math.min(maxSec, Number(raw?.startSec || 0)));
+    const endInput = Number(raw?.endSec || 0);
+    const end = endInput > start ? Math.min(maxSec, endInput) : maxSec;
+    if (!(end - start >= MIN_TRIM_DURATION_SEC)) continue;
+    normalized.push({ startSec: start, endSec: end });
+  }
+  normalized.sort((a, b) => a.startSec - b.startSec);
+  const merged = [];
+  for (const seg of normalized) {
+    const prev = merged[merged.length - 1];
+    if (prev && seg.startSec < prev.endSec - 0.001) {
+      prev.endSec = Math.max(prev.endSec, seg.endSec);
+    } else {
+      merged.push({ startSec: seg.startSec, endSec: seg.endSec });
+    }
+  }
+  if (!merged.length && maxSec > 0) {
+    merged.push({ startSec: 0, endSec: maxSec });
+  }
+  const durationSec = merged.reduce((sum, seg) => sum + Math.max(0, seg.endSec - seg.startSec), 0);
+  const startSec = merged.length ? merged[0].startSec : 0;
+  const endSec = merged.length ? merged[merged.length - 1].endSec : 0;
+  return { startSec, endSec, durationSec, segments: merged };
 }
 
 function normalizeTrimBoundsForDuration(sourceDuration) {
   const range = trimRangeForDuration(sourceDuration);
-  const nextStart = Number(range.startSec.toFixed(3));
-  const nextEnd = Number(range.endSec.toFixed(3));
+  const roundedSegments = range.segments.map((seg) => ({
+    startSec: Number(seg.startSec.toFixed(3)),
+    endSec: Number(seg.endSec.toFixed(3)),
+  }));
+  project.trimSegments = roundedSegments;
+  const nextStart = roundedSegments.length ? roundedSegments[0].startSec : 0;
+  const nextEnd = roundedSegments.length ? roundedSegments[roundedSegments.length - 1].endSec : 0;
   if (Math.abs(Number(project.trimStartSec || 0) - nextStart) > 0.0005) project.trimStartSec = nextStart;
   if (Math.abs(Number(project.trimEndSec || 0) - nextEnd) > 0.0005) project.trimEndSec = nextEnd;
+  if (trimSplitHover) {
+    const selected = roundedSegments[trimSplitHover.index];
+    if (!selected) trimSplitHover = null;
+    else {
+      const clampedAt = Math.max(
+        selected.startSec + MIN_TRIM_DURATION_SEC,
+        Math.min(selected.endSec - MIN_TRIM_DURATION_SEC, Number(trimSplitHover.atSec || selected.startSec))
+      );
+      if (!(selected.endSec - selected.startSec >= MIN_TRIM_DURATION_SEC * 2)) trimSplitHover = null;
+      else trimSplitHover = { index: trimSplitHover.index, atSec: clampedAt };
+    }
+  }
   return range;
 }
 
@@ -487,14 +532,27 @@ function effectiveDurationSec() {
 
 function mediaToTrimmedSec(mediaSec, sourceDuration = videoEl.duration) {
   const range = trimRangeForDuration(sourceDurationSecFor(sourceDuration));
-  const media = Math.max(range.startSec, Math.min(range.endSec, Number(mediaSec || 0)));
-  return Math.max(0, media - range.startSec);
+  const media = Number(mediaSec || 0);
+  let acc = 0;
+  for (const seg of range.segments) {
+    const segDur = Math.max(0, seg.endSec - seg.startSec);
+    if (media <= seg.startSec) return acc;
+    if (media <= seg.endSec) return acc + (media - seg.startSec);
+    acc += segDur;
+  }
+  return acc;
 }
 
 function trimmedToMediaSec(trimmedSec, sourceDuration = videoEl.duration) {
   const range = trimRangeForDuration(sourceDurationSecFor(sourceDuration));
   const t = Math.max(0, Math.min(range.durationSec, Number(trimmedSec || 0)));
-  return range.startSec + t;
+  let acc = 0;
+  for (const seg of range.segments) {
+    const segDur = Math.max(0, seg.endSec - seg.startSec);
+    if (t <= acc + segDur) return seg.startSec + (t - acc);
+    acc += segDur;
+  }
+  return range.segments.length ? range.segments[range.segments.length - 1].endSec : 0;
 }
 
 function clampPlaybackToEffectiveDuration() {
@@ -502,15 +560,52 @@ function clampPlaybackToEffectiveDuration() {
   const range = trimRangeForDuration(sourceDurationSecFor(videoEl.duration));
   if (!(range.durationSec > 0)) return;
   const current = Number(videoEl.currentTime || 0);
-  if (current < range.startSec) {
-    videoEl.currentTime = range.startSec;
+  const segments = range.segments;
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  if (!first || !last) return;
+  if (current < first.startSec) {
+    videoEl.currentTime = first.startSec;
     videoEl.pause();
     return;
   }
-  if (current > range.endSec) {
-    videoEl.currentTime = range.endSec;
+  if (current > last.endSec) {
+    videoEl.currentTime = last.endSec;
     videoEl.pause();
+    return;
   }
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const currentSeg = segments[i];
+    const nextSeg = segments[i + 1];
+    if (current > currentSeg.endSec && current < nextSeg.startSec) {
+      videoEl.currentTime = nextSeg.startSec;
+      videoEl.pause();
+      return;
+    }
+  }
+}
+
+function splitTrimSegment(index, atSec) {
+  const range = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+  const seg = range.segments[index];
+  if (!seg) return false;
+  const splitAt = Math.max(seg.startSec + MIN_TRIM_DURATION_SEC, Math.min(seg.endSec - MIN_TRIM_DURATION_SEC, Number(atSec || 0)));
+  if (!(splitAt > seg.startSec + 0.0005 && splitAt < seg.endSec - 0.0005)) return false;
+  beginTimelineHistoryEntry();
+  const nextSegments = range.segments.map((item) => ({ startSec: item.startSec, endSec: item.endSec }));
+  nextSegments.splice(index, 1,
+    { startSec: seg.startSec, endSec: splitAt },
+    { startSec: splitAt, endSec: seg.endSec }
+  );
+  project.trimSegments = nextSegments;
+  normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+  trimSplitHover = null;
+  clampPlaybackToEffectiveDuration();
+  renderEffectsTimeline();
+  syncPlaybackUi();
+  commitTimelineHistoryEntry();
+  queueDraftProjectPersist();
+  return true;
 }
 
 function formatSec(ms) {
@@ -980,14 +1075,23 @@ function buildTrackSegments(kind, trackEl, durSec) {
 function renderTrimSegment(trackEl, durSec) {
   if (!trackEl) return;
   const range = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
-  const seg = createTimelineSegment("trim", range.startSec, range.endSec, "Active Range", Math.max(durSec, 0.001));
-  if (!seg) return;
-  seg.dataset.kind = "trim";
-  seg.title = `Trim (${range.startSec.toFixed(2)}s - ${range.endSec.toFixed(2)}s)`;
-  seg.innerHTML = `<span class="timeline-segment-label">Active Range</span>
-    <span class="timeline-handle left" data-side="left"></span>
-    <span class="timeline-handle right" data-side="right"></span>`;
-  trackEl.appendChild(seg);
+  range.segments.forEach((item, index) => {
+    const label = range.segments.length > 1 ? `Keep ${index + 1}` : "Active Range";
+    const seg = createTimelineSegment("trim", item.startSec, item.endSec, label, Math.max(durSec, 0.001));
+    if (!seg) return;
+    seg.dataset.kind = "trim";
+    seg.dataset.index = String(index);
+    seg.title = `Trim (${item.startSec.toFixed(2)}s - ${item.endSec.toFixed(2)}s)`;
+    const shouldShowSplit = trimSplitHover && trimSplitHover.index === index;
+    const splitOffsetPct = shouldShowSplit
+      ? ((Number(trimSplitHover.atSec || item.startSec) - item.startSec) / Math.max(0.001, item.endSec - item.startSec)) * 100
+      : 0;
+    seg.innerHTML = `<span class="timeline-segment-label">${label}</span>
+      ${shouldShowSplit ? `<span class="trim-split-guide" aria-hidden="true" style="left:${Math.max(6, Math.min(94, splitOffsetPct)).toFixed(3)}%"></span>` : ""}
+      <span class="timeline-handle left" data-side="left"></span>
+      <span class="timeline-handle right" data-side="right"></span>`;
+    trackEl.appendChild(seg);
+  });
 }
 
 function renderEffectsTimeline() {
@@ -3025,6 +3129,7 @@ function isDesktopAutoloadVideoSource() {
 async function tryDesktopExportJob() {
   if (!isDesktopAutoloadVideoSource()) return null;
   const payload = {
+    trimSegments: Array.isArray(project.trimSegments) ? project.trimSegments : [],
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
@@ -3083,6 +3188,7 @@ async function tryDesktopBackendRenderJob() {
     ? normalizeRenderFpsValue(project.renderFpsValue)
     : await preferredDeterministicFps(videoEl).catch(() => 60);
   const payload = {
+    trimSegments: Array.isArray(project.trimSegments) ? project.trimSegments : [],
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
@@ -3652,6 +3758,7 @@ async function applyLoadedProjectData(data) {
     ? normalizeCursorSplineGuideHz(data.cursorSplineGuideHz)
     : legacySmoothStrengthToGuideHz(data.cursorSmoothStrength);
   project.aspectPreset = normalizeAspectPreset(data.aspectPreset);
+  project.trimSegments = JSON.parse(JSON.stringify(Array.isArray(data.trimSegments) ? data.trimSegments : []));
   project.trimStartSec = Number(data.trimStartSec || 0);
   project.trimEndSec = Number(data.trimEndSec || 0);
   project.renderFrameTransport = normalizeRenderFrameTransport(data.renderFrameTransport);
@@ -3759,6 +3866,7 @@ function serializeProjectState() {
     cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
     cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     aspectPreset: normalizeAspectPreset(project.aspectPreset),
+    trimSegments: JSON.parse(JSON.stringify(Array.isArray(project.trimSegments) ? project.trimSegments : [])),
     trimStartSec: Number(project.trimStartSec || 0),
     trimEndSec: Number(project.trimEndSec || 0),
     renderFrameTransport: normalizeRenderFrameTransport(project.renderFrameTransport),
@@ -4285,7 +4393,19 @@ timelineSurface.addEventListener("click", (e) => {
       return;
     }
     const kind = segEl.dataset.kind;
-    if (kind === "trim") return;
+    if (kind === "trim") {
+      const index = Number(segEl.dataset.index || -1);
+      const range = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+      const seg = range.segments[index];
+      if (!seg) return;
+      const side = resizeSideFromPoint(segEl, e.clientX);
+      if (side) return;
+      const rect = segEl.getBoundingClientRect();
+      const localX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const atSec = seg.startSec + ((localX / Math.max(1, rect.width)) * (seg.endSec - seg.startSec));
+      splitTrimSegment(index, atSec);
+      return;
+    }
     const index = Number(segEl.dataset.index || -1);
     if ((kind === "zoom" || kind === "text") && index >= 0) {
       openEffectEditor(kind, index, segEl, { clientX: e.clientX, clientY: e.clientY });
@@ -4325,21 +4445,25 @@ timelineSurface.addEventListener("pointerdown", (e) => {
   const handleEl = e.target.closest(".timeline-handle");
   const kind = segEl.dataset.kind;
   if (kind === "trim") {
-    const side = (handleEl && (handleEl.dataset.side === "left" || handleEl.dataset.side === "right"))
+    if (!handleEl) return;
+    const side = (handleEl.dataset.side === "left" || handleEl.dataset.side === "right")
       ? handleEl.dataset.side
-      : resizeSideFromPoint(segEl, e.clientX);
+      : null;
+    const index = Number(segEl.dataset.index || -1);
     const durSec = Math.max(0, sourceDurationSecFor(videoEl.duration), timelineDurationSec());
     const range = trimRangeForDuration(durSec);
-    const mode = (side === "left" || side === "right") ? side : "move";
+    const seg = range.segments[index];
+    if (!seg || !side) return;
     suppressNextSegmentClick = true;
     beginTimelineHistoryEntry();
     resizingEffect = {
       kind: "trim",
-      side: mode,
+      index,
+      side,
       trackEl: trimTrack,
       startClientX: e.clientX,
-      origTrimStart: range.startSec,
-      origTrimEnd: range.endSec,
+      origTrimStart: seg.startSec,
+      origTrimEnd: seg.endSec,
       durSec,
       moved: false,
     };
@@ -4382,22 +4506,62 @@ window.addEventListener("pointermove", (e) => {
     if (Math.abs(dx) > 2) resizingEffect.moved = true;
     const originalStart = Number(resizingEffect.origTrimStart || 0);
     const originalEnd = Number(resizingEffect.origTrimEnd || 0);
-    const currentSpan = Math.max(MIN_TRIM_DURATION_SEC, originalEnd - originalStart);
+    const segIndex = Number(resizingEffect.index || 0);
+    const currentSegments = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration)).segments
+      .map((seg) => ({ startSec: seg.startSec, endSec: seg.endSec }));
+    const prevSeg = segIndex > 0 ? currentSegments[segIndex - 1] : null;
+    const nextSeg = segIndex + 1 < currentSegments.length ? currentSegments[segIndex + 1] : null;
+    let nextStart = originalStart;
+    let nextEnd = originalEnd;
     if (side === "left") {
-      project.trimStartSec = Math.max(0, Math.min(originalEnd - MIN_TRIM_DURATION_SEC, originalStart + deltaSec));
-      project.trimEndSec = originalEnd;
+      const proposedStart = Math.min(originalEnd - MIN_TRIM_DURATION_SEC, originalStart + deltaSec);
+      if (prevSeg && proposedStart <= prevSeg.endSec + 0.001) {
+        currentSegments.splice(segIndex - 1, 2, {
+          startSec: prevSeg.startSec,
+          endSec: originalEnd,
+        });
+        project.trimSegments = currentSegments;
+        normalizeTrimBoundsForDuration(durSec);
+        clampPlaybackToEffectiveDuration();
+        renderEffectsTimeline();
+        syncPlaybackUi();
+        document.body.style.cursor = "ew-resize";
+        suppressNextSegmentClick = true;
+        commitTimelineHistoryEntry();
+        queueDraftProjectPersist();
+        resizingEffect = null;
+        document.body.style.cursor = "";
+        timelineSurface.classList.remove("dragging");
+        return;
+      }
+      nextStart = Math.max(0, proposedStart);
       document.body.style.cursor = "ew-resize";
     } else if (side === "right") {
-      project.trimStartSec = originalStart;
-      project.trimEndSec = Math.max(originalStart + MIN_TRIM_DURATION_SEC, Math.min(durSec, originalEnd + deltaSec));
+      const proposedEnd = Math.max(originalStart + MIN_TRIM_DURATION_SEC, originalEnd + deltaSec);
+      if (nextSeg && proposedEnd >= nextSeg.startSec - 0.001) {
+        currentSegments.splice(segIndex, 2, {
+          startSec: originalStart,
+          endSec: nextSeg.endSec,
+        });
+        project.trimSegments = currentSegments;
+        normalizeTrimBoundsForDuration(durSec);
+        clampPlaybackToEffectiveDuration();
+        renderEffectsTimeline();
+        syncPlaybackUi();
+        document.body.style.cursor = "ew-resize";
+        suppressNextSegmentClick = true;
+        commitTimelineHistoryEntry();
+        queueDraftProjectPersist();
+        resizingEffect = null;
+        document.body.style.cursor = "";
+        timelineSurface.classList.remove("dragging");
+        return;
+      }
+      nextEnd = Math.min(durSec, proposedEnd);
       document.body.style.cursor = "ew-resize";
-    } else {
-      let nextStart = originalStart + deltaSec;
-      nextStart = Math.max(0, Math.min(durSec - currentSpan, nextStart));
-      project.trimStartSec = nextStart;
-      project.trimEndSec = nextStart + currentSpan;
-      document.body.style.cursor = "grabbing";
     }
+    currentSegments[segIndex] = { startSec: nextStart, endSec: nextEnd };
+    project.trimSegments = currentSegments;
     normalizeTrimBoundsForDuration(durSec);
     clampPlaybackToEffectiveDuration();
     renderEffectsTimeline();
@@ -4447,23 +4611,55 @@ timelineSurface.addEventListener("pointermove", (e) => {
     return;
   }
   const segEl = e.target.closest(".timeline-segment");
-  if (segEl && (segEl.dataset.kind === "zoom" || segEl.dataset.kind === "text")) {
+  if (!segEl) {
+    if (trimSplitHover) {
+      trimSplitHover = null;
+      renderEffectsTimeline();
+    }
+    timelineSurface.style.cursor = "pointer";
+    return;
+  }
+  if (segEl.dataset.kind === "trim") {
+    const index = Number(segEl.dataset.index || -1);
+    const range = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+    const seg = range.segments[index];
+    const side = resizeSideFromPoint(segEl, e.clientX);
+    if (seg && !side && (seg.endSec - seg.startSec >= MIN_TRIM_DURATION_SEC * 2)) {
+      const rect = segEl.getBoundingClientRect();
+      const localX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const atSec = seg.startSec + ((localX / Math.max(1, rect.width)) * (seg.endSec - seg.startSec));
+      const nextHover = {
+        index,
+        atSec: Math.max(seg.startSec + MIN_TRIM_DURATION_SEC, Math.min(seg.endSec - MIN_TRIM_DURATION_SEC, atSec)),
+      };
+      if (!trimSplitHover || trimSplitHover.index !== nextHover.index || Math.abs(trimSplitHover.atSec - nextHover.atSec) > 0.002) {
+        trimSplitHover = nextHover;
+        renderEffectsTimeline();
+      }
+    } else if (trimSplitHover) {
+      trimSplitHover = null;
+      renderEffectsTimeline();
+    }
+    timelineSurface.style.cursor = side ? "ew-resize" : "crosshair";
+    return;
+  }
+  if (segEl.dataset.kind === "zoom" || segEl.dataset.kind === "text") {
     lastHoveredSegmentRef = {
       kind: segEl.dataset.kind,
       index: Number(segEl.dataset.index || -1),
     };
   }
-  if (!segEl) {
-    timelineSurface.style.cursor = "pointer";
-    return;
-  }
   const side = resizeSideFromPoint(segEl, e.clientX);
-  timelineSurface.style.cursor = side ? "ew-resize" : "grab";
+  timelineSurface.style.cursor = side ? "ew-resize" : (segEl.dataset.kind === "trim" ? "pointer" : "grab");
 });
 
 timelineSurface.addEventListener("pointerleave", () => {
   if (!resizingEffect) timelineSurface.style.cursor = "pointer";
   lastHoveredSegmentRef = null;
+  if (trimSplitHover) {
+    trimSplitHover = null;
+    renderEffectsTimeline();
+  }
 });
 
 effectEditorCloseBtn.addEventListener("click", () => {

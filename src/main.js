@@ -1695,6 +1695,117 @@ async function probeVideoDurationSec(inputPath) {
   });
 }
 
+async function probeHasAudioStream(inputPath) {
+  return await new Promise((resolve, reject) => {
+    const args = [
+      "-v",
+      "error",
+      "-select_streams",
+      "a:0",
+      "-show_entries",
+      "stream=index",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      inputPath,
+    ];
+    const proc = spawn("ffprobe", args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      out += String(d || "");
+    });
+    proc.once("error", reject);
+    proc.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error("ffprobe audio probe failed"));
+        return;
+      }
+      resolve(Boolean(String(out || "").trim()));
+    });
+  });
+}
+
+function normalizeTrimSegmentsFromManifest(manifest, sourceDuration = Number.POSITIVE_INFINITY) {
+  const maxSec = Number.isFinite(sourceDuration)
+    ? Math.max(0, Number(sourceDuration || 0))
+    : Number.POSITIVE_INFINITY;
+  const legacyStart = Math.max(0, Number(manifest?.trimStartSec || 0));
+  const legacyEndRaw = Number(manifest?.trimEndSec || 0);
+  const rawSegments = Array.isArray(manifest?.trimSegments) && manifest.trimSegments.length
+    ? manifest.trimSegments
+    : [{ startSec: legacyStart, endSec: legacyEndRaw > legacyStart ? legacyEndRaw : maxSec }];
+  const normalized = [];
+  for (const raw of rawSegments) {
+    const startSec = Math.max(0, Math.min(maxSec, Number(raw?.startSec || 0)));
+    const endInput = Number(raw?.endSec || 0);
+    const defaultEnd = Number.isFinite(maxSec) ? maxSec : startSec;
+    const endSec = endInput > startSec
+      ? Math.min(maxSec, endInput)
+      : defaultEnd;
+    if (!(endSec > startSec + 0.0005)) continue;
+    normalized.push({ startSec, endSec });
+  }
+  normalized.sort((a, b) => a.startSec - b.startSec);
+  const merged = [];
+  for (const seg of normalized) {
+    const prev = merged[merged.length - 1];
+    if (prev && seg.startSec < prev.endSec - 0.001) {
+      prev.endSec = Math.max(prev.endSec, seg.endSec);
+    } else {
+      merged.push({ startSec: seg.startSec, endSec: seg.endSec });
+    }
+  }
+  return merged;
+}
+
+function trimSegmentsDurationSec(trimSegments) {
+  return trimSegments.reduce((sum, seg) => sum + Math.max(0, Number(seg.endSec || 0) - Number(seg.startSec || 0)), 0);
+}
+
+function mapSourceTimeToEditedTime(srcSec, trimSegments) {
+  const t = Number(srcSec || 0);
+  let acc = 0;
+  for (const seg of trimSegments) {
+    const startSec = Number(seg.startSec || 0);
+    const endSec = Math.max(startSec, Number(seg.endSec || 0));
+    const segDur = Math.max(0, endSec - startSec);
+    if (t < startSec) return null;
+    if (t <= endSec) return acc + (t - startSec);
+    acc += segDur;
+  }
+  return null;
+}
+
+function remapSourceIntervalToEditedSegments(startSec, endSec, trimSegments) {
+  const start = Math.max(0, Number(startSec || 0));
+  const end = Math.max(start, Number(endSec || 0));
+  if (!(end > start)) return [];
+  const out = [];
+  let acc = 0;
+  for (const seg of trimSegments) {
+    const segStart = Number(seg.startSec || 0);
+    const segEnd = Math.max(segStart, Number(seg.endSec || 0));
+    const segDur = Math.max(0, segEnd - segStart);
+    const overlapStart = Math.max(start, segStart);
+    const overlapEnd = Math.min(end, segEnd);
+    if (overlapEnd > overlapStart) {
+      out.push({
+        startSec: acc + (overlapStart - segStart),
+        endSec: acc + (overlapEnd - segStart),
+      });
+    }
+    acc += segDur;
+  }
+  if (out.length < 2) return out;
+  const merged = [out[0]];
+  for (let i = 1; i < out.length; i += 1) {
+    const prev = merged[merged.length - 1];
+    const cur = out[i];
+    if (cur.startSec < prev.endSec - 0.001) prev.endSec = Math.max(prev.endSec, cur.endSec);
+    else merged.push(cur);
+  }
+  return merged;
+}
+
 function normalizeSessionEventsToDuration(events, sourceDurationMs, targetDurationMs) {
   const source = Number(sourceDurationMs || 0);
   const target = Number(targetDurationMs || 0);
@@ -1713,9 +1824,8 @@ function normalizeSessionEventsToDuration(events, sourceDurationMs, targetDurati
 }
 
 function ffmpegArgsEditorExport(inputPath, outputPath, manifest, dims) {
-  const trimStartSec = Math.max(0, Number(manifest?.trimStartSec || 0));
-  const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
-  const hasTrimEnd = Number.isFinite(trimEndSecRaw) && trimEndSecRaw > trimStartSec;
+  const trimSegments = normalizeTrimSegmentsFromManifest(manifest);
+  const hasTrimSegments = trimSegments.length > 0;
   const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
   const sourceAspect = dims.width / Math.max(1, dims.height);
   let vf = "";
@@ -1727,15 +1837,26 @@ function ffmpegArgsEditorExport(inputPath, outputPath, manifest, dims) {
     }
   }
 
-  const args = ["-y"];
-  if (trimStartSec > 0) {
-    args.push("-ss", trimStartSec.toFixed(3));
-  }
-  args.push("-i", inputPath);
-  if (hasTrimEnd) {
-    args.push("-to", trimEndSecRaw.toFixed(3));
-  }
-  if (vf) {
+  const args = ["-y", "-i", inputPath];
+  if (hasTrimSegments && trimSegments.length > 1) {
+    const graphParts = [];
+    const concatInputs = [];
+    trimSegments.forEach((seg, index) => {
+      graphParts.push(
+        `[0:v]trim=start=${seg.startSec.toFixed(3)}:end=${seg.endSec.toFixed(3)},setpts=PTS-STARTPTS[v${index}]`
+      );
+      concatInputs.push(`[v${index}]`);
+    });
+    graphParts.push(`${concatInputs.join("")}concat=n=${trimSegments.length}:v=1:a=0[vcat]`);
+    if (vf) graphParts.push(`[vcat]${vf}[vout]`);
+    const filterComplex = graphParts.join(";");
+    args.push("-filter_complex", filterComplex, "-map", vf ? "[vout]" : "[vcat]");
+  } else if (hasTrimSegments && trimSegments.length === 1) {
+    const seg = trimSegments[0];
+    if (seg.startSec > 0) args.push("-ss", seg.startSec.toFixed(3));
+    if (seg.endSec > seg.startSec) args.push("-to", seg.endSec.toFixed(3));
+    if (vf) args.push("-vf", vf);
+  } else if (vf) {
     args.push("-vf", vf);
   }
   args.push(
@@ -1856,7 +1977,7 @@ function normalizeCursorSplineGuideHzBackend(value) {
   return Math.max(1, Math.min(120, n));
 }
 
-function buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec) {
+function buildPointerEventsForBackend(manifest, dims, trimSegments, trimDurationSec) {
   const eventList = Array.isArray(manifest?.events) ? manifest.events : [];
   const captureBounds = manifest?.captureBounds && typeof manifest.captureBounds === "object"
     ? manifest.captureBounds
@@ -1870,8 +1991,8 @@ function buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDuration
     if (type !== "mouse_move" && type !== "mouse_down" && type !== "mouse_up") continue;
     if (evt?.inFrame === false) continue;
     const tSecAbs = Number(evt?.t || 0) / 1000;
-    const tSec = tSecAbs - trimStartSec;
-    if (tSec < 0 || tSec > trimDurationSec) continue;
+    const tSec = mapSourceTimeToEditedTime(tSecAbs, trimSegments);
+    if (tSec == null || tSec < 0 || tSec > trimDurationSec) continue;
     const xr = eventRatioFromManifest(evt, "x", captureBounds);
     const yr = eventRatioFromManifest(evt, "y", captureBounds);
     if (xr == null || yr == null) continue;
@@ -1954,9 +2075,9 @@ function splineAtBackend(anchors, tSec) {
   };
 }
 
-function buildCursorKeyframesBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps) {
+function buildCursorKeyframesBackend(manifest, dims, trimSegments, trimDurationSec, targetFps) {
   const mode = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode);
-  const points = buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec);
+  const points = buildPointerEventsForBackend(manifest, dims, trimSegments, trimDurationSec);
   if (!points.length) return [];
   const budget = cursorKeyframeBudget(trimDurationSec, targetFps, mode);
   if (mode === "raw") {
@@ -2071,8 +2192,8 @@ function buildCursorOverlayExpr(track, coord, hotspot, isRaw) {
   return parts.join(";");
 }
 
-function buildCursorCommandTrackBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps) {
-  const points = buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec);
+function buildCursorCommandTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps) {
+  const points = buildPointerEventsForBackend(manifest, dims, trimSegments, trimDurationSec);
   if (!points.length) return [];
   const mode = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode);
   const guideHz = normalizeCursorSplineGuideHzBackend(manifest?.cursorSplineGuideHz);
@@ -2172,16 +2293,19 @@ function generateClickEffectsOverlay(clicks, dims, fps, durationSec, tmpDir) {
   });
 }
 
-async function generateTextOverlayVideo(manifest, dims, fps, trimStartSec, trimDurationSec, tmpDir) {
+async function generateTextOverlayVideo(manifest, dims, fps, trimSegments, trimDurationSec, tmpDir) {
   const texts = Array.isArray(manifest?.texts) ? manifest.texts : [];
   if (!texts.length) return null;
   const adjusted = [];
   for (const t of texts) {
-    const startSec = Math.max(0, Number(t.startSec || 0) - trimStartSec);
-    const endSec = Math.max(0, Number(t.endSec || 0) - trimStartSec);
-    if (!(endSec > startSec) || endSec < 0 || startSec > trimDurationSec) continue;
     if (!String(t.value || "").trim()) continue;
-    adjusted.push({ ...t, startSec, endSec });
+    const spans = remapSourceIntervalToEditedSegments(Number(t.startSec || 0), Number(t.endSec || 0), trimSegments);
+    for (const span of spans) {
+      const startSec = Math.max(0, span.startSec);
+      const endSec = Math.max(startSec, Math.min(trimDurationSec, span.endSec));
+      if (!(endSec > startSec) || endSec < 0 || startSec > trimDurationSec) continue;
+      adjusted.push({ ...t, startSec, endSec });
+    }
   }
   if (!adjusted.length) return null;
 
@@ -2217,23 +2341,23 @@ async function generateTextOverlayVideo(manifest, dims, fps, trimStartSec, trimD
   }
 }
 
-function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
+function buildBackendZoomScaleExpr(manifest, trimSegments, trimDurationSec) {
   const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
   if (!zooms.length) return "1";
 
   const normalized = [];
   for (const z of zooms) {
-    const rawStart = Number(z?.startSec || 0) - trimStartSec;
-    const rawEnd = Number(z?.endSec || 0) - trimStartSec;
-    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) continue;
-    const startSec = Math.max(0, rawStart);
-    const endSec = Math.min(trimDurationSec, rawEnd);
-    if (!(endSec > startSec)) continue;
-    const durSec = endSec - startSec;
-    const targetScale = Math.max(1, Number(z?.scale || 1));
-    const easeSecRaw = Math.max(0, Number(z?.easeMs || 0)) / 1000;
-    const easeSec = Math.min(easeSecRaw, durSec * 0.5);
-    normalized.push({ startSec, endSec, targetScale, easeSec });
+    const spans = remapSourceIntervalToEditedSegments(Number(z?.startSec || 0), Number(z?.endSec || 0), trimSegments);
+    for (const span of spans) {
+      const startSec = Math.max(0, span.startSec);
+      const endSec = Math.min(trimDurationSec, span.endSec);
+      if (!(endSec > startSec)) continue;
+      const durSec = endSec - startSec;
+      const targetScale = Math.max(1, Number(z?.scale || 1));
+      const easeSecRaw = Math.max(0, Number(z?.easeMs || 0)) / 1000;
+      const easeSec = Math.min(easeSecRaw, durSec * 0.5);
+      normalized.push({ startSec, endSec, targetScale, easeSec });
+    }
   }
   if (!normalized.length) return "1";
   normalized.sort((a, b) => a.startSec - b.startSec);
@@ -2260,18 +2384,18 @@ function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
 }
 
 async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tmpDir) {
-  const trimStartSec = Math.max(0, Number(manifest?.trimStartSec || 0));
-  const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
-  const hasTrimEnd = Number.isFinite(trimEndSecRaw) && trimEndSecRaw > trimStartSec;
-  const trimDurationSec = hasTrimEnd ? Math.max(0, trimEndSecRaw - trimStartSec) : Number.POSITIVE_INFINITY;
-
-  // Determine effective video duration for loop-fade
+  const sourceDurationSec = await probeVideoDurationSec(inputPath).catch(() => 0);
+  let trimSegments = normalizeTrimSegmentsFromManifest(
+    manifest,
+    sourceDurationSec > 0 ? sourceDurationSec : Number.POSITIVE_INFINITY
+  );
+  if (!trimSegments.length && sourceDurationSec > 0) {
+    trimSegments = [{ startSec: 0, endSec: sourceDurationSec }];
+  }
+  const trimDurationSec = trimSegmentsDurationSec(trimSegments);
   let effectiveDurationSec = trimDurationSec;
-  if (!Number.isFinite(effectiveDurationSec)) {
-    try {
-      const probedDur = await probeVideoDurationSec(inputPath);
-      effectiveDurationSec = Math.max(0, probedDur - trimStartSec);
-    } catch { effectiveDurationSec = 0; }
+  if (!(effectiveDurationSec > 0)) {
+    effectiveDurationSec = sourceDurationSec > 0 ? sourceDurationSec : 0;
   }
   const loopFadeSec = 0.5;
   const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
@@ -2301,10 +2425,16 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   const cursorHotspotY = Number(manifest?.cursorHotspotY || 0);
   const cursorSize = 6;
   const cursorHalf = Math.floor(cursorSize / 2);
+  const hasAudio = await probeHasAudioStream(inputPath).catch(() => false);
+  const requiresTrimGraph = trimSegments.length > 1
+    || (trimSegments.length === 1 && (
+      trimSegments[0].startSec > 0.0005
+      || (sourceDurationSec > 0 && trimSegments[0].endSec < sourceDurationSec - 0.0005)
+    ));
 
-  const pointerKeyframes = buildCursorKeyframesBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps);
+  const pointerKeyframes = buildCursorKeyframesBackend(manifest, dims, trimSegments, trimDurationSec, targetFps);
   const cursorCommandTrack = useCustomCursor
-    ? buildCursorCommandTrackBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps)
+    ? buildCursorCommandTrackBackend(manifest, dims, trimSegments, trimDurationSec, targetFps)
     : [];
 
   const overlayFilters = [];
@@ -2328,8 +2458,8 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     if (String(evt?.type || "") !== "mouse_down") continue;
     if (evt?.inFrame === false) continue;
     const tSecAbs = Number(evt?.t || 0) / 1000;
-    const tSec = tSecAbs - trimStartSec;
-    if (tSec < 0 || tSec > trimDurationSec) continue;
+    const tSec = mapSourceTimeToEditedTime(tSecAbs, trimSegments);
+    if (tSec == null || tSec < 0 || tSec > trimDurationSec) continue;
     const xr = eventRatioFromManifest(evt, "x", captureBounds);
     const yr = eventRatioFromManifest(evt, "y", captureBounds);
     if (xr == null || yr == null) continue;
@@ -2343,7 +2473,7 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
 
   const vfParts = [];
   if (overlayFilters.length) vfParts.push(...overlayFilters);
-  const zoomScaleExpr = buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec);
+  const zoomScaleExpr = buildBackendZoomScaleExpr(manifest, trimSegments, trimDurationSec);
   if (zoomScaleExpr !== "1") {
     vfParts.push(
       `crop=w='trunc(iw/(${zoomScaleExpr})/2)*2':h='trunc(ih/(${zoomScaleExpr})/2)*2':x='(iw-ow)/2':y='(ih-oh)/2'`,
@@ -2353,17 +2483,13 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   if (cropFilter) vfParts.push(cropFilter);
 
   const overlayFps = targetFps > 0 ? targetFps : 60;
-  const overlayDurationSec = Number.isFinite(trimDurationSec) ? trimDurationSec : effectiveDurationSec;
-  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimStartSec, overlayDurationSec, tmpDir);
+  const overlayDurationSec = effectiveDurationSec;
+  const textOverlayPath = await generateTextOverlayVideo(manifest, dims, overlayFps, trimSegments, overlayDurationSec, tmpDir);
   const clickOverlayPath = clickEvents.length
     ? await generateClickEffectsOverlay(clickEvents, dims, overlayFps, overlayDurationSec, tmpDir)
     : null;
 
-  const args = ["-y"];
-  if (trimStartSec > 0) {
-    args.push("-ss", trimStartSec.toFixed(3));
-  }
-  args.push("-i", inputPath);
+  const args = ["-y", "-i", inputPath];
   let cursorImagePath = "";
   let nextInputIdx = 1;
   if (parsedCursor && parsedCursor.buffer.length > 0) {
@@ -2400,13 +2526,47 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     args.push("-i", clickOverlayPath);
     nextInputIdx += 1;
   }
-  if (hasTrimEnd) {
-    args.push("-to", trimEndSecRaw.toFixed(3));
-  }
-  const needsFilterGraph = vfParts.length || cursorImagePath || textOverlayPath || clickOverlayPath;
+  const needsFilterGraph = requiresTrimGraph || vfParts.length || cursorImagePath || textOverlayPath || clickOverlayPath;
   if (needsFilterGraph) {
+    const graphParts = [];
+    let baseVideoLabel = "0:v";
+    let baseAudioLabel = hasAudio ? "0:a" : "";
+    if (requiresTrimGraph) {
+      if (trimSegments.length === 1) {
+        const seg = trimSegments[0];
+        graphParts.push(
+          `[0:v]trim=start=${seg.startSec.toFixed(3)}:end=${seg.endSec.toFixed(3)},setpts=PTS-STARTPTS[trimv]`
+        );
+        baseVideoLabel = "trimv";
+        if (hasAudio) {
+          graphParts.push(
+            `[0:a]atrim=start=${seg.startSec.toFixed(3)}:end=${seg.endSec.toFixed(3)},asetpts=PTS-STARTPTS[trima]`
+          );
+          baseAudioLabel = "trima";
+        }
+      } else {
+        const concatInputs = [];
+        trimSegments.forEach((seg, index) => {
+          graphParts.push(
+            `[0:v]trim=start=${seg.startSec.toFixed(3)}:end=${seg.endSec.toFixed(3)},setpts=PTS-STARTPTS[v${index}]`
+          );
+          concatInputs.push(`[v${index}]`);
+          if (hasAudio) {
+            graphParts.push(
+              `[0:a]atrim=start=${seg.startSec.toFixed(3)}:end=${seg.endSec.toFixed(3)},asetpts=PTS-STARTPTS[a${index}]`
+            );
+            concatInputs.push(`[a${index}]`);
+          }
+        });
+        graphParts.push(
+          `${concatInputs.join("")}concat=n=${trimSegments.length}:v=1:a=${hasAudio ? 1 : 0}[trimv]${hasAudio ? "[trima]" : ""}`
+        );
+        baseVideoLabel = "trimv";
+        if (hasAudio) baseAudioLabel = "trima";
+      }
+    }
     const baseChain = vfParts.length ? vfParts.join(",") : "null";
-    let graph = `[0:v]${baseChain}[basev]`;
+    let graph = `${graphParts.join(";")}${graphParts.length ? ";" : ""}[${baseVideoLabel}]${baseChain}[basev]`;
     let lastLabel = "basev";
     if (cursorImagePath && cursorCommandTrack.length > 0) {
       const cursorIdx = 1;
@@ -2440,7 +2600,8 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
     await fs.writeFile(filterScriptPath, graph, "utf8");
     args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");
-    args.push("-map", "0:a?");
+    if (baseAudioLabel) args.push("-map", `[${baseAudioLabel}]`);
+    else args.push("-an");
   } else {
     const canLoopFadeSimple = effectiveDurationSec > loopFadeSec * 2;
     if (canLoopFadeSimple) {
@@ -2452,9 +2613,12 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
       const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
       await fs.writeFile(filterScriptPath, graph, "utf8");
       args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");
-      args.push("-map", "0:a?");
+      if (hasAudio) args.push("-map", "0:a:0");
+      else args.push("-an");
     } else {
-      args.push("-map", "0:v:0", "-map", "0:a?");
+      args.push("-map", "0:v:0");
+      if (hasAudio) args.push("-map", "0:a:0");
+      else args.push("-an");
     }
   }
   if (targetFps > 0) {

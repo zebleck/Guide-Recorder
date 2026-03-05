@@ -2095,6 +2095,99 @@ function buildCursorCommandTrackBackend(manifest, dims, trimStartSec, trimDurati
   return buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps, guideHz);
 }
 
+function drawRing(buf, width, height, cx, cy, radius, thickness, r, g, b, alpha) {
+  const halfT = thickness * 0.5;
+  const rOuter = radius + halfT;
+  const rInner = Math.max(0, radius - halfT);
+  const minX = Math.max(0, Math.floor(cx - rOuter - 1));
+  const maxX = Math.min(width - 1, Math.ceil(cx + rOuter + 1));
+  const minY = Math.max(0, Math.floor(cy - rOuter - 1));
+  const maxY = Math.min(height - 1, Math.ceil(cy + rOuter + 1));
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < rInner - 1 || dist > rOuter + 1) continue;
+      const edgeInner = dist - rInner;
+      const edgeOuter = rOuter - dist;
+      const aa = Math.min(1, Math.max(0, Math.min(edgeInner, edgeOuter)));
+      if (aa <= 0) continue;
+      const a = Math.round(alpha * aa * 255);
+      if (a <= 0) continue;
+      const idx = (py * width + px) * 4;
+      const prevA = buf[idx + 3];
+      if (a > prevA) {
+        buf[idx] = r;
+        buf[idx + 1] = g;
+        buf[idx + 2] = b;
+        buf[idx + 3] = a;
+      }
+    }
+  }
+}
+
+function generateClickEffectsOverlay(clicks, dims, fps, durationSec, tmpDir) {
+  if (!clicks.length) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const outPath = path.join(tmpDir, "click_effects.mov");
+    const w = dims.width;
+    const h = dims.height;
+    const bytesPerFrame = w * h * 4;
+    const frameCount = Math.ceil(durationSec * fps);
+    const life = 0.46;
+
+    const proc = spawn("ffmpeg", [
+      "-y",
+      "-f", "rawvideo",
+      "-pix_fmt", "rgba",
+      "-s", `${w}x${h}`,
+      "-r", String(fps),
+      "-i", "pipe:0",
+      "-c:v", "qtrle",
+      "-pix_fmt", "argb",
+      outPath,
+    ], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+
+    const buf = Buffer.alloc(bytesPerFrame, 0);
+    let frameIdx = 0;
+    let errored = false;
+
+    proc.on("error", (err) => { errored = true; reject(err); });
+    proc.on("close", (code) => {
+      if (errored) return;
+      if (code === 0) resolve(outPath);
+      else reject(new Error(`click effects ffmpeg exited with code ${code}`));
+    });
+
+    function writeFrame() {
+      while (frameIdx < frameCount) {
+        const t = frameIdx / fps;
+        buf.fill(0);
+        let hasContent = false;
+        for (let ci = 0; ci < clicks.length; ci += 1) {
+          const c = clicks[ci];
+          const age = t - c.tSec;
+          if (age < 0 || age > life) continue;
+          hasContent = true;
+          const p = age / life;
+          const radius = 12 + p * 34;
+          const alpha = 1 - p;
+          drawRing(buf, w, h, c.x, c.y, radius, 2, c.r, c.g, c.b, alpha);
+        }
+        frameIdx += 1;
+        if (!hasContent) {
+          if (!proc.stdin.write(buf)) { proc.stdin.once("drain", writeFrame); return; }
+          continue;
+        }
+        if (!proc.stdin.write(buf)) { proc.stdin.once("drain", writeFrame); return; }
+      }
+      proc.stdin.end();
+    }
+    writeFrame();
+  });
+}
+
 function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
   const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
   if (!zooms.length) return "1";
@@ -2201,7 +2294,7 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     }
   }
 
-  let clickCount = 0;
+  const clickEvents = [];
   for (let i = 0; i < eventList.length; i += 1) {
     const evt = eventList[i];
     if (String(evt?.type || "") !== "mouse_down") continue;
@@ -2214,18 +2307,10 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     if (xr == null || yr == null) continue;
     const x = Math.max(0, Math.min(dims.width - 1, Math.round(xr * dims.width + cursorOffsetX)));
     const y = Math.max(0, Math.min(dims.height - 1, Math.round(yr * dims.height + cursorOffsetY)));
-    const burstSize = 22;
-    const burstHalf = Math.floor(burstSize / 2);
-    const bx = Math.max(0, x - burstHalf);
-    const by = Math.max(0, y - burstHalf);
     const button = Number(evt?.button || 0);
-    const color = button === 2 ? "red@0.55" : button === 1 ? "yellow@0.55" : "lime@0.55";
-    const tEnd = Math.min(trimDurationSec, tSec + 0.16);
-    overlayFilters.push(
-      `drawbox=x=${bx}:y=${by}:w=${burstSize}:h=${burstSize}:color=${color}:t=2:enable='between(t,${tSec.toFixed(3)},${tEnd.toFixed(3)})'`
-    );
-    clickCount += 1;
-    if (clickCount >= 800) break;
+    const [r, g, b] = button === 2 ? [249, 95, 98] : button === 1 ? [255, 200, 0] : [22, 163, 74];
+    clickEvents.push({ tSec, x, y, r, g, b });
+    if (clickEvents.length >= 800) break;
   }
 
   const vfParts = [];
@@ -2239,12 +2324,18 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   }
   if (cropFilter) vfParts.push(cropFilter);
 
+  const clickFps = targetFps > 0 ? targetFps : 60;
+  const clickOverlayPath = clickEvents.length
+    ? await generateClickEffectsOverlay(clickEvents, dims, clickFps, trimDurationSec, tmpDir)
+    : null;
+
   const args = ["-y"];
   if (trimStartSec > 0) {
     args.push("-ss", trimStartSec.toFixed(3));
   }
   args.push("-i", inputPath);
   let cursorImagePath = "";
+  let nextInputIdx = 1;
   if (parsedCursor && parsedCursor.buffer.length > 0) {
     const candidatePath = path.join(tmpDir, `cursor${extForMimeType(parsedCursor.mimeType)}`);
     await fs.writeFile(candidatePath, parsedCursor.buffer);
@@ -2264,23 +2355,38 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
     if (looksReasonableCursor) {
       cursorImagePath = candidatePath;
       args.push("-loop", "1", "-i", cursorImagePath);
+      nextInputIdx += 1;
     }
+  }
+  let clickInputIdx = -1;
+  if (clickOverlayPath) {
+    clickInputIdx = nextInputIdx;
+    args.push("-i", clickOverlayPath);
+    nextInputIdx += 1;
   }
   if (hasTrimEnd) {
     args.push("-to", trimEndSecRaw.toFixed(3));
   }
-  if (vfParts.length || cursorImagePath) {
+  const needsFilterGraph = vfParts.length || cursorImagePath || clickOverlayPath;
+  if (needsFilterGraph) {
     const baseChain = vfParts.length ? vfParts.join(",") : "null";
     let graph = `[0:v]${baseChain}[basev]`;
+    let lastLabel = "basev";
     if (cursorImagePath && cursorCommandTrack.length > 0) {
+      const cursorIdx = 1;
       const isRaw = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode) === "raw";
       const xExpr = buildCursorOverlayExpr(cursorCommandTrack, "x", cursorHotspotX, isRaw);
       const yExpr = buildCursorOverlayExpr(cursorCommandTrack, "y", cursorHotspotY, isRaw);
-      graph += `;[1:v]format=rgba,setpts=PTS-STARTPTS[cursorv]`;
-      graph += `;[basev][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[vout]`;
-    } else {
-      graph += ";[basev]copy[vout]";
+      graph += `;[${cursorIdx}:v]format=rgba,setpts=PTS-STARTPTS[cursorv]`;
+      graph += `;[${lastLabel}][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[withcursor]`;
+      lastLabel = "withcursor";
     }
+    if (clickInputIdx >= 0) {
+      graph += `;[${clickInputIdx}:v]format=rgba,setpts=PTS-STARTPTS[clicksv]`;
+      graph += `;[${lastLabel}][clicksv]overlay=0:0:format=auto:shortest=1[withclicks]`;
+      lastLabel = "withclicks";
+    }
+    graph += `;[${lastLabel}]copy[vout]`;
     const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
     await fs.writeFile(filterScriptPath, graph, "utf8");
     args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");

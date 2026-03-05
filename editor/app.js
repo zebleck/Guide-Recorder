@@ -3414,8 +3414,7 @@ async function preferredDeterministicFps(video) {
     const settings = track?.getSettings ? track.getSettings() : null;
     const raw = Number(settings?.frameRate || 0);
     stream.getTracks().forEach((t) => t.stop());
-    if (raw > 45) return 60;
-    if (raw > 0) return 30;
+    if (raw > 0) return Math.max(1, Math.min(240, Math.round(raw)));
   } catch {
     // ignore
   }

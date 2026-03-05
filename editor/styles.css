@@ -1024,10 +1024,14 @@ select:focus {
   right: -2px;
 }
 
-.timeline-segment:hover .timeline-remove-btn,
 .timeline-segment.selected .timeline-remove-btn {
   opacity: 1;
   pointer-events: auto;
+}
+
+.timeline-segment.inline-delete-hidden .timeline-remove-btn {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .timeline-remove-btn:hover {

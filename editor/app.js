@@ -1,5 +1,7 @@
 const exportFinalBtn = document.getElementById("exportFinalBtn");
 const saveProjectBtn = document.getElementById("saveProjectBtn");
+const undoTimelineBtn = document.getElementById("undoTimelineBtn");
+const redoTimelineBtn = document.getElementById("redoTimelineBtn");
 const loadProjectInput = document.getElementById("loadProjectInput");
 const loadVideoInput = document.getElementById("loadVideoInput");
 const statusEl = document.getElementById("status");
@@ -68,6 +70,8 @@ let composeCanvas = null;
 let composeCtx = null;
 let gpuZoomRenderer = null;
 let gpuZoomDisabled = false;
+let loopFadeFirstFrameCanvas = null;
+let loopFadeFirstFrameDims = "";
 const PREVIEW_EXPORT_VIDEO_BITRATE = 32000000;
 const CURSOR_PREFS_STORAGE_KEY = "guide-recorder.cursor-prefs.v1";
 const EDITOR_DRAFT_DB_NAME = "guide-recorder-editor";
@@ -75,6 +79,7 @@ const EDITOR_DRAFT_STORE = "drafts";
 const EDITOR_DRAFT_PROJECT_KEY = "project";
 const EDITOR_DRAFT_VIDEO_KEY = "video";
 const EFFECT_CLIPBOARD_STORAGE_KEY = "guide-recorder.effect-clipboard.v1";
+const TIMELINE_HISTORY_LIMIT = 120;
 const DETERMINISTIC_EXPORT_MAX_FRAMES = 12000;
 const GPU_ZOOM_COMPOSITE_ENABLED = true;
 let cursorTextureImage = null;
@@ -83,6 +88,7 @@ let uiPrimedForPlayback = false;
 const MIN_EFFECT_DURATION_SEC = 0.2;
 const MIN_TRIM_DURATION_SEC = 0.05;
 const EFFECT_RESIZE_EDGE_PX = 20;
+const INLINE_DELETE_MIN_SEGMENT_PX = 32;
 const CAMERA_DEADZONE_RATIO = 0.22;
 const ASPECT_PRESET_VALUES = {
   "16:9": 16 / 9,
@@ -126,6 +132,12 @@ let draftPersistTimer = 0;
 let lastPointerClientX = 0;
 let lastPointerClientY = 0;
 let lastHoveredSegmentRef = null;
+const timelineHistory = {
+  past: [],
+  future: [],
+  pending: null,
+  isApplying: false,
+};
 
 const project = {
   recordedBlob: null,
@@ -159,10 +171,117 @@ function setStatus(msg) {
   statusEl.textContent = msg;
 }
 
+function captureTimelineState() {
+  return {
+    trimStartSec: Number(project.trimStartSec || 0),
+    trimEndSec: Number(project.trimEndSec || 0),
+    zooms: JSON.parse(JSON.stringify(Array.isArray(project.zooms) ? project.zooms : [])),
+    texts: JSON.parse(JSON.stringify(Array.isArray(project.texts) ? project.texts : [])),
+  };
+}
+
+function timelineStateEquals(a, b) {
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function syncHistoryEditingSelection() {
+  if (!editingEffect) return;
+  const list = effectsFor(editingEffect.kind);
+  if (!Array.isArray(list) || list.length === 0) {
+    hideEffectEditor();
+    return;
+  }
+  const idx = Math.max(0, Math.min(list.length - 1, Number(editingEffect.index || 0)));
+  editingEffect.index = idx;
+  editingEffect.effect = list[idx];
+}
+
+function applyTimelineState(state) {
+  if (!state || timelineHistory.isApplying) return false;
+  timelineHistory.isApplying = true;
+  try {
+    project.trimStartSec = Number(state.trimStartSec || 0);
+    project.trimEndSec = Number(state.trimEndSec || 0);
+    project.zooms = JSON.parse(JSON.stringify(Array.isArray(state.zooms) ? state.zooms : []));
+    project.texts = JSON.parse(JSON.stringify(Array.isArray(state.texts) ? state.texts : []));
+    sortEffects();
+    normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+    clampPlaybackToEffectiveDuration();
+    syncHistoryEditingSelection();
+    renderEffectsTimeline();
+    syncPlaybackUi();
+    return true;
+  } finally {
+    timelineHistory.isApplying = false;
+  }
+}
+
+function refreshTimelineHistoryButtons() {
+  if (undoTimelineBtn) undoTimelineBtn.disabled = timelineHistory.past.length === 0;
+  if (redoTimelineBtn) redoTimelineBtn.disabled = timelineHistory.future.length === 0;
+}
+
+function resetTimelineHistory() {
+  timelineHistory.past.length = 0;
+  timelineHistory.future.length = 0;
+  timelineHistory.pending = null;
+  refreshTimelineHistoryButtons();
+}
+
+function beginTimelineHistoryEntry() {
+  if (timelineHistory.isApplying) return;
+  if (timelineHistory.pending) return;
+  timelineHistory.pending = captureTimelineState();
+}
+
+function commitTimelineHistoryEntry() {
+  if (timelineHistory.isApplying) return false;
+  if (!timelineHistory.pending) return false;
+  const before = timelineHistory.pending;
+  timelineHistory.pending = null;
+  const after = captureTimelineState();
+  if (timelineStateEquals(before, after)) {
+    refreshTimelineHistoryButtons();
+    return false;
+  }
+  timelineHistory.past.push(before);
+  if (timelineHistory.past.length > TIMELINE_HISTORY_LIMIT) timelineHistory.past.shift();
+  timelineHistory.future.length = 0;
+  refreshTimelineHistoryButtons();
+  return true;
+}
+
+function undoTimelineAction() {
+  if (!timelineHistory.past.length) return false;
+  const prev = timelineHistory.past.pop();
+  const current = captureTimelineState();
+  timelineHistory.future.push(current);
+  const applied = applyTimelineState(prev);
+  timelineHistory.pending = null;
+  refreshTimelineHistoryButtons();
+  if (applied) queueDraftProjectPersist();
+  return applied;
+}
+
+function redoTimelineAction() {
+  if (!timelineHistory.future.length) return false;
+  const next = timelineHistory.future.pop();
+  const current = captureTimelineState();
+  timelineHistory.past.push(current);
+  if (timelineHistory.past.length > TIMELINE_HISTORY_LIMIT) timelineHistory.past.shift();
+  const applied = applyTimelineState(next);
+  timelineHistory.pending = null;
+  refreshTimelineHistoryButtons();
+  if (applied) queueDraftProjectPersist();
+  return applied;
+}
+
 function refreshActionButtons() {
   exportFinalBtn.disabled = !videoEl.src;
   playPauseBtn.disabled = !videoEl.src;
   seekBar.disabled = !videoEl.src;
+  refreshTimelineHistoryButtons();
 }
 
 function formatClock(sec) {
@@ -629,6 +748,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       if (!active) return;
       const key = input.dataset.key;
       if (!key) return;
+      beginTimelineHistoryEntry();
       if (key === "fontWeight") {
         active.fontWeight = input.checked ? "bold" : "normal";
       } else if (key === "fontStyle") {
@@ -677,6 +797,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       editingEffect.index = effectsFor(kind).indexOf(active);
       renderEffectsTimeline();
       syncPlaybackUi();
+      commitTimelineHistoryEntry();
       queueDraftProjectPersist();
     };
     input.addEventListener("input", onFieldChange);
@@ -694,6 +815,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       if (!active || kind !== "text") return;
       const action = btn.dataset.action;
       if (action !== "centerText") return;
+      beginTimelineHistoryEntry();
       active.xPct = 50;
       active.yPct = 50;
       active.align = "center";
@@ -703,6 +825,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
       if (yInput) yInput.value = "50";
       renderEffectsTimeline();
       syncPlaybackUi();
+      commitTimelineHistoryEntry();
       queueDraftProjectPersist();
     });
   }
@@ -718,6 +841,7 @@ function openEffectEditor(kind, index, anchorEl = null, anchorPoint = null) {
 function deleteEffect(kind, index) {
   const list = effectsFor(kind);
   if (!list || index < 0 || index >= list.length) return false;
+  beginTimelineHistoryEntry();
   const effect = list[index];
   list.splice(index, 1);
   if (editingEffect && editingEffect.kind === kind && editingEffect.effect === effect) {
@@ -726,6 +850,7 @@ function deleteEffect(kind, index) {
     renderEffectsTimeline();
   }
   syncPlaybackUi();
+  commitTimelineHistoryEntry();
   queueDraftProjectPersist();
   return true;
 }
@@ -813,10 +938,12 @@ function pasteEffectFromClipboardAtPointer() {
     startSec: nextStart,
     endSec: nextStart + duration,
   };
+  beginTimelineHistoryEntry();
   list.push(clone);
   sortEffects();
   renderEffectsTimeline();
   syncPlaybackUi();
+  commitTimelineHistoryEntry();
   queueDraftProjectPersist();
   setStatus(`Pasted ${kind} effect.`);
   return true;
@@ -824,14 +951,21 @@ function pasteEffectFromClipboardAtPointer() {
 
 function buildTrackSegments(kind, trackEl, durSec) {
   const list = effectsFor(kind);
+  const trackWidthPx = Math.max(1, trackEl.getBoundingClientRect().width || 1);
   list.forEach((item, index) => {
     const label = kind === "zoom"
       ? `x${Number(item.scale || 1).toFixed(1)}`
       : (String(item.value || "Text").trim() || "Text");
-    const seg = createTimelineSegment(kind, item.startSec, item.endSec, label, durSec);
+    const startSec = Math.max(0, Number(item.startSec || 0));
+    const endSec = Math.max(startSec, Number(item.endSec || 0));
+    const seg = createTimelineSegment(kind, startSec, endSec, label, durSec);
     if (!seg) return;
+    const segWidthPx = ((endSec - startSec) / Math.max(0.001, durSec)) * trackWidthPx;
+    const inlineDeleteEnabled = segWidthPx >= INLINE_DELETE_MIN_SEGMENT_PX;
     seg.dataset.kind = kind;
     seg.dataset.index = String(index);
+    seg.dataset.inlineDeleteEnabled = inlineDeleteEnabled ? "1" : "0";
+    if (!inlineDeleteEnabled) seg.classList.add("inline-delete-hidden");
     if (editingEffect && editingEffect.kind === kind && editingEffect.effect === item) {
       seg.classList.add("selected");
     }
@@ -2796,6 +2930,24 @@ function renderOverlay() {
   renderExportFrame(frame.ctx, videoEl, currentMs, frame.width, frame.height, {
     showHoldInfo: false,
   });
+  // Loop-fade: capture first frame and crossfade at end
+  const LOOP_FADE_SEC = 0.5;
+  const dimsKey = `${frame.width}x${frame.height}`;
+  if (trimmedSec < 0.05 && dur > LOOP_FADE_SEC * 2) {
+    if (!loopFadeFirstFrameCanvas || loopFadeFirstFrameDims !== dimsKey) {
+      loopFadeFirstFrameCanvas = document.createElement("canvas");
+      loopFadeFirstFrameCanvas.width = frame.width;
+      loopFadeFirstFrameCanvas.height = frame.height;
+      loopFadeFirstFrameCanvas.getContext("2d").drawImage(frame.canvas, 0, 0);
+      loopFadeFirstFrameDims = dimsKey;
+    }
+  }
+  if (loopFadeFirstFrameCanvas && loopFadeFirstFrameDims === dimsKey && dur > LOOP_FADE_SEC * 2 && trimmedSec > dur - LOOP_FADE_SEC) {
+    const fadeProgress = Math.min(1, (trimmedSec - (dur - LOOP_FADE_SEC)) / LOOP_FADE_SEC);
+    frame.ctx.globalAlpha = fadeProgress;
+    frame.ctx.drawImage(loopFadeFirstFrameCanvas, 0, 0);
+    frame.ctx.globalAlpha = 1;
+  }
   clearOverlay();
   ctx.drawImage(frame.canvas, 0, 0, canvas.width, canvas.height);
 
@@ -3236,6 +3388,9 @@ async function tryDesktopDeterministicFrameExport({
     };
 
     setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
+    // Loop-fade: capture first frame and crossfade into it at the end
+    const LOOP_FADE_SEC = 0.5;
+    let firstFrameCanvas = null;
     // Periodically recreate the source <video> to release decoder-side memory over long exports.
     const CHUNK_FRAMES = 180;
     let currentVideo = exportVideo;
@@ -3286,6 +3441,21 @@ async function tryDesktopDeterministicFrameExport({
       const renderMs = targetSec * 1000;
       const drawStart = performance.now();
       renderExportFrame(frameCtx, currentVideo, renderMs, width, height, { useGpuZoom: false });
+      // Capture first frame for loop-fade
+      if (frameIndex === 0 && targetDurationSec > LOOP_FADE_SEC * 2) {
+        firstFrameCanvas = document.createElement("canvas");
+        firstFrameCanvas.width = width;
+        firstFrameCanvas.height = height;
+        firstFrameCanvas.getContext("2d").drawImage(frameCanvas, 0, 0);
+      }
+      // Blend with first frame during the last LOOP_FADE_SEC
+      const trimmedSec = targetSec - trimStartSec;
+      if (firstFrameCanvas && trimmedSec > targetDurationSec - LOOP_FADE_SEC) {
+        const fadeProgress = Math.min(1, (trimmedSec - (targetDurationSec - LOOP_FADE_SEC)) / LOOP_FADE_SEC);
+        frameCtx.globalAlpha = fadeProgress;
+        frameCtx.drawImage(firstFrameCanvas, 0, 0);
+        frameCtx.globalAlpha = 1;
+      }
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
       let encodedFrame = null;
@@ -3485,6 +3655,7 @@ async function applyLoadedProjectData(data) {
   );
   sortEffects();
   normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
+  resetTimelineHistory();
   renderEffectsTimeline();
   syncPreviewStageAspect();
   fitCanvasToVideo();
@@ -3596,6 +3767,8 @@ async function persistDraftVideoSource(source) {
 }
 
 function attachCurrentVideoToPlayer(statusText = "") {
+  loopFadeFirstFrameCanvas = null;
+  loopFadeFirstFrameDims = "";
   videoEl.src = importedVideoUrl || "";
   videoEl.onloadedmetadata = () => {
     const range = normalizeTrimBoundsForDuration(sourceDurationSecFor(videoEl.duration));
@@ -3766,6 +3939,16 @@ if (renderFpsValueInput) {
 }
 
 exportFinalBtn.addEventListener("click", exportFinalVideo);
+if (undoTimelineBtn) {
+  undoTimelineBtn.addEventListener("click", () => {
+    undoTimelineAction();
+  });
+}
+if (redoTimelineBtn) {
+  redoTimelineBtn.addEventListener("click", () => {
+    redoTimelineAction();
+  });
+}
 cursorOffsetXInput.addEventListener("input", () => {
   project.cursorOffsetX = Number(cursorOffsetXInput.value || 0);
   persistCursorPrefsToLocalStorage();
@@ -3994,6 +4177,7 @@ function onLanePointerMove(kind, e) {
 }
 
 function addEffectAt(kind, atSec) {
+  beginTimelineHistoryEntry();
   const startSec = Math.max(0, Number(atSec || 0));
   const maxDur = timelineDurationSec();
   const endSec = Math.min(maxDur, startSec + 2);
@@ -4007,6 +4191,7 @@ function addEffectAt(kind, atSec) {
     project.zooms.push(z);
     sortEffects();
     renderEffectsTimeline();
+    commitTimelineHistoryEntry();
     queueDraftProjectPersist();
     return;
   }
@@ -4030,6 +4215,7 @@ function addEffectAt(kind, atSec) {
   project.texts.push(t);
   sortEffects();
   renderEffectsTimeline();
+  commitTimelineHistoryEntry();
   queueDraftProjectPersist();
 }
 
@@ -4064,8 +4250,11 @@ timelineSurface.addEventListener("click", (e) => {
     if (!segEl) return;
     const kind = segEl.dataset.kind;
     const index = Number(segEl.dataset.index || -1);
-    if ((kind === "zoom" || kind === "text") && index >= 0) {
+    const canInlineDelete = segEl.classList.contains("selected") && segEl.dataset.inlineDeleteEnabled === "1";
+    if ((kind === "zoom" || kind === "text") && index >= 0 && canInlineDelete) {
       deleteEffect(kind, index);
+    } else if ((kind === "zoom" || kind === "text") && index >= 0) {
+      openEffectEditor(kind, index, segEl, { clientX: e.clientX, clientY: e.clientY });
     }
     return;
   }
@@ -4123,6 +4312,7 @@ timelineSurface.addEventListener("pointerdown", (e) => {
     const range = trimRangeForDuration(durSec);
     const mode = (side === "left" || side === "right") ? side : "move";
     suppressNextSegmentClick = true;
+    beginTimelineHistoryEntry();
     resizingEffect = {
       kind: "trim",
       side: mode,
@@ -4146,6 +4336,7 @@ timelineSurface.addEventListener("pointerdown", (e) => {
   if (!effect || !trackEl) return;
   const mode = (side === "left" || side === "right") ? side : "move";
   suppressNextSegmentClick = true;
+  beginTimelineHistoryEntry();
   resizingEffect = {
     kind,
     effect,
@@ -4220,6 +4411,7 @@ window.addEventListener("pointermove", (e) => {
 window.addEventListener("pointerup", () => {
   if (resizingEffect) {
     suppressNextSegmentClick = resizingEffect.moved;
+    commitTimelineHistoryEntry();
     queueDraftProjectPersist();
   }
   resizingEffect = null;
@@ -4270,11 +4462,13 @@ effectEditorDuplicateBtn.addEventListener("click", () => {
   clone.startSec = Number(clone.startSec || 0) + shiftSec;
   clone.endSec = Number(clone.endSec || 0) + shiftSec;
   const list = effectsFor(kind);
+  beginTimelineHistoryEntry();
   list.push(clone);
   sortEffects();
   const newIndex = list.indexOf(clone);
   hideEffectEditor();
   openEffectEditor(kind, newIndex);
+  commitTimelineHistoryEntry();
   queueDraftProjectPersist();
 });
 
@@ -4333,6 +4527,18 @@ window.addEventListener("keydown", (e) => {
   const target = e.target;
   const isEditable = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
   const cmdOrCtrl = e.ctrlKey || e.metaKey;
+  if (cmdOrCtrl && !e.altKey && !isEditable && (e.key === "z" || e.key === "Z")) {
+    if (e.shiftKey) {
+      if (redoTimelineAction()) e.preventDefault();
+      return;
+    }
+    if (undoTimelineAction()) e.preventDefault();
+    return;
+  }
+  if (cmdOrCtrl && !e.shiftKey && !e.altKey && !isEditable && (e.key === "y" || e.key === "Y")) {
+    if (redoTimelineAction()) e.preventDefault();
+    return;
+  }
   if (cmdOrCtrl && !e.shiftKey && !e.altKey && !isEditable && (e.key === "c" || e.key === "C")) {
     if (copySelectedEffectToClipboard()) e.preventDefault();
     return;

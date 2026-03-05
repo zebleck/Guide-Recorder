@@ -2272,6 +2272,16 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
   const hasTrimEnd = Number.isFinite(trimEndSecRaw) && trimEndSecRaw > trimStartSec;
   const trimDurationSec = hasTrimEnd ? Math.max(0, trimEndSecRaw - trimStartSec) : Number.POSITIVE_INFINITY;
+
+  // Determine effective video duration for loop-fade
+  let effectiveDurationSec = trimDurationSec;
+  if (!Number.isFinite(effectiveDurationSec)) {
+    try {
+      const probedDur = await probeVideoDurationSec(inputPath);
+      effectiveDurationSec = Math.max(0, probedDur - trimStartSec);
+    } catch { effectiveDurationSec = 0; }
+  }
+  const loopFadeSec = 0.5;
   const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
   const sourceAspect = dims.width / Math.max(1, dims.height);
   let cropFilter = "";
@@ -2423,13 +2433,35 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
       graph += `;[${lastLabel}][clicksv]overlay=0:0:format=auto:shortest=1[withclicks]`;
       lastLabel = "withclicks";
     }
-    graph += `;[${lastLabel}]copy[vout]`;
+    // Loop-fade: crossfade end of video into the first frame
+    const canLoopFade = effectiveDurationSec > loopFadeSec * 2;
+    if (canLoopFade) {
+      const xfadeOffset = Math.max(0, effectiveDurationSec - loopFadeSec);
+      graph += `;[${lastLabel}]split[_main][_forfirst]`;
+      graph += `;[_forfirst]trim=start=0:end=${(1 / Math.max(1, overlayFps)).toFixed(6)},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${loopFadeSec.toFixed(3)}[_firstframe]`;
+      graph += `;[_main][_firstframe]xfade=transition=fade:duration=${loopFadeSec.toFixed(3)}:offset=${xfadeOffset.toFixed(3)}[vout]`;
+    } else {
+      graph += `;[${lastLabel}]copy[vout]`;
+    }
     const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
     await fs.writeFile(filterScriptPath, graph, "utf8");
     args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");
     args.push("-map", "0:a?");
   } else {
-    args.push("-map", "0:v:0", "-map", "0:a?");
+    const canLoopFadeSimple = effectiveDurationSec > loopFadeSec * 2;
+    if (canLoopFadeSimple) {
+      const xfadeOffset = Math.max(0, effectiveDurationSec - loopFadeSec);
+      const graph =
+        `[0:v]split[_main][_forfirst]`
+        + `;[_forfirst]trim=start=0:end=${(1 / 30).toFixed(6)},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${loopFadeSec.toFixed(3)}[_firstframe]`
+        + `;[_main][_firstframe]xfade=transition=fade:duration=${loopFadeSec.toFixed(3)}:offset=${xfadeOffset.toFixed(3)}[vout]`;
+      const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
+      await fs.writeFile(filterScriptPath, graph, "utf8");
+      args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");
+      args.push("-map", "0:a?");
+    } else {
+      args.push("-map", "0:v:0", "-map", "0:a?");
+    }
   }
   if (targetFps > 0) {
     args.push("-r", String(targetFps), "-vsync", "cfr");

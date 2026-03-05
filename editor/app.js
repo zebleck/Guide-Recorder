@@ -1517,6 +1517,11 @@ const cursorSplineTrackCache = {
   anchors: [],
 };
 
+const backendCursorTrackCache = {
+  key: "",
+  keyframes: [],
+};
+
 const pointerEventTrackCache = {
   key: "",
   indices: [],
@@ -1655,6 +1660,17 @@ function pushSplineAnchor(anchors, t, x, y, isClick = false) {
   anchors.push({ t: tx, x: ax, y: ay, click: Boolean(isClick) });
 }
 
+function reduceCursorKeyframes(points, maxCount) {
+  if (!Array.isArray(points) || points.length <= maxCount) return Array.isArray(points) ? points : [];
+  const stride = Math.max(1, Math.ceil(points.length / maxCount));
+  const out = [];
+  for (let i = 0; i < points.length; i += stride) {
+    out.push(points[i]);
+  }
+  if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+  return out;
+}
+
 function getSplineCursorAnchors(guideHz) {
   const key = cursorSplineCacheKey(guideHz);
   if (cursorSplineTrackCache.key === key) return cursorSplineTrackCache.anchors;
@@ -1703,6 +1719,139 @@ function catmullRom1d(p0, p1, p2, p3, u) {
     + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2
     + (-p0 + 3 * p1 - 3 * p2 + p3) * u3
   );
+}
+
+function backendPreviewCursorCacheKey(width, height, targetFps) {
+  const evts = project.events;
+  const last = evts.length ? evts[evts.length - 1] : null;
+  const cb = project.captureBounds || {};
+  return [
+    evts.length,
+    Number(last?.t || 0).toFixed(3),
+    Number(width || 0),
+    Number(height || 0),
+    normalizeCursorMotionMode(project.cursorMotionMode),
+    normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
+    Number(targetFps || 0),
+    Number(project.cursorOffsetX || 0),
+    Number(project.cursorOffsetY || 0),
+    Number(cb.x || 0),
+    Number(cb.y || 0),
+    Number(cb.width || 0),
+    Number(cb.height || 0),
+  ].join("|");
+}
+
+function selectedRenderFpsForPreview() {
+  const fpsMode = normalizeRenderFpsMode(project.renderFpsMode);
+  if (fpsMode === "custom") return normalizeRenderFpsValue(project.renderFpsValue);
+  return 60;
+}
+
+function buildBackendStyleCursorTrack(width, height) {
+  const targetFps = selectedRenderFpsForPreview();
+  const key = backendPreviewCursorCacheKey(width, height, targetFps);
+  if (backendCursorTrackCache.key === key) return backendCursorTrackCache.keyframes;
+
+  const mode = normalizeCursorMotionMode(project.cursorMotionMode);
+  const evts = project.events;
+  const points = [];
+  for (let i = 0; i < evts.length; i += 1) {
+    const evt = evts[i];
+    if (!isPointerEventType(evt?.type)) continue;
+    if (evt.inFrame === false) continue;
+    const pos = exportEventToPosition(evt, width, height);
+    if (!pos) continue;
+    points.push({
+      t: Number(evt.t || 0),
+      x: Math.max(0, Math.min(width - 1, Number(pos.x || 0))),
+      y: Math.max(0, Math.min(height - 1, Number(pos.y || 0))),
+      type: String(evt.type || ""),
+    });
+  }
+  points.sort((a, b) => a.t - b.t);
+
+  let keyframes = [];
+  if (!points.length) {
+    keyframes = [];
+  } else if (mode === "raw") {
+    keyframes = reduceCursorKeyframes(points, 280);
+  } else if (mode === "linear") {
+    keyframes = reduceCursorKeyframes(points, 220);
+  } else {
+    const guideHz = normalizeCursorSplineGuideHz(project.cursorSplineGuideHz);
+    const stepMs = 1000 / Math.max(1, guideHz);
+    const anchors = [];
+    let nextGuideT = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      const isClick = p.type === "mouse_down" || p.type === "mouse_up";
+      if (!anchors.length) {
+        anchors.push({ t: p.t, x: p.x, y: p.y, click: isClick });
+        nextGuideT = p.t + stepMs;
+        continue;
+      }
+      if (isClick || p.t >= nextGuideT) {
+        anchors.push({ t: p.t, x: p.x, y: p.y, click: isClick });
+        nextGuideT = p.t + stepMs;
+      }
+    }
+    if (!anchors.length) {
+      keyframes = reduceCursorKeyframes(points, 220);
+    } else {
+      const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
+      const sampleStepMs = 1000 / sampleFps;
+      const endMs = Number(points[points.length - 1].t || 0);
+      const sampled = [];
+      for (let t = 0; t <= endMs + 0.1; t += sampleStepMs) {
+        const norm = splineNormAt(t, guideHz);
+        if (!norm) continue;
+        sampled.push({
+          t: Math.max(0, Math.min(endMs, t)),
+          x: Math.max(0, Math.min(width - 1, Math.round(norm.x * width + Number(project.cursorOffsetX || 0)))),
+          y: Math.max(0, Math.min(height - 1, Math.round(norm.y * height + Number(project.cursorOffsetY || 0)))),
+          type: "mouse_move",
+        });
+      }
+      keyframes = sampled.length ? reduceCursorKeyframes(sampled, 220) : reduceCursorKeyframes(points, 220);
+    }
+  }
+
+  backendCursorTrackCache.key = key;
+  backendCursorTrackCache.keyframes = keyframes;
+  return keyframes;
+}
+
+function pointerAtForExportBackendParity(currentMs, width, height) {
+  const mode = normalizeCursorMotionMode(project.cursorMotionMode);
+  const track = buildBackendStyleCursorTrack(width, height);
+  if (!track.length) return { inFrame: false, x: width / 2, y: height / 2 };
+
+  let lo = 0;
+  let hi = track.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (track[mid].t <= currentMs) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best < 0) return { inFrame: true, x: track[0].x, y: track[0].y };
+  if (best >= track.length - 1 || mode === "raw") {
+    return { inFrame: true, x: track[best].x, y: track[best].y };
+  }
+  const prev = track[best];
+  const next = track[best + 1];
+  const dt = Math.max(0.001, Number(next.t || 0) - Number(prev.t || 0));
+  const p = Math.max(0, Math.min(1, (currentMs - Number(prev.t || 0)) / dt));
+  return {
+    inFrame: true,
+    x: Number(prev.x || 0) + (Number(next.x || 0) - Number(prev.x || 0)) * p,
+    y: Number(prev.y || 0) + (Number(next.y || 0) - Number(prev.y || 0)) * p,
+  };
 }
 
 function splineNormAt(currentMs, guideHz) {
@@ -1864,19 +2013,7 @@ function exportEventToPosition(evt, width, height) {
 }
 
 function pointerAtForExport(currentMs, width, height) {
-  return resolveCursorPointerAt(
-    currentMs,
-    (evt) => exportEventToPosition(evt, width, height),
-    (norm) => {
-      const ox = Number(project.cursorOffsetX || 0);
-      const oy = Number(project.cursorOffsetY || 0);
-      return {
-        x: norm.x * width + ox,
-        y: norm.y * height + oy,
-      };
-    },
-    () => ({ inFrame: false, x: width / 2, y: height / 2 })
-  );
+  return pointerAtForExportBackendParity(currentMs, width, height);
 }
 
 function drawCursorOn(renderCtx, pointer) {
@@ -2787,6 +2924,8 @@ async function tryDesktopBackendRenderJob() {
     cursorOffsetY: Number(project.cursorOffsetY || 0),
     cursorHotspotX: Number(project.cursorHotspotX || 0),
     cursorHotspotY: Number(project.cursorHotspotY || 0),
+    cursorMotionMode: normalizeCursorMotionMode(project.cursorMotionMode),
+    cursorSplineGuideHz: normalizeCursorSplineGuideHz(project.cursorSplineGuideHz),
     cursorTextureDataUrl: String(project.cursorTextureDataUrl || ""),
     renderFpsMode: fpsMode,
     renderFps: Math.max(1, Math.min(240, Number(selectedFps || 60))),

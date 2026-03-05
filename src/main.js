@@ -1784,6 +1784,12 @@ function parseDataUrlImage(dataUrl) {
   const m = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,([\s\S]*)$/i.exec(raw);
   if (!m) return null;
   const mimeType = String(m[1] || "application/octet-stream").toLowerCase();
+  const isSupportedImage = mimeType === "image/png"
+    || mimeType === "image/webp"
+    || mimeType === "image/jpeg"
+    || mimeType === "image/jpg"
+    || mimeType === "image/bmp";
+  if (!isSupportedImage) return null;
   const isBase64 = Boolean(m[2]);
   const body = String(m[3] || "");
   try {
@@ -1804,6 +1810,289 @@ function extForMimeType(mimeType) {
   if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
   if (mime.includes("bmp")) return ".bmp";
   return ".img";
+}
+
+async function probeMediaDimensions(inputPath) {
+  return await new Promise((resolve) => {
+    const args = [
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=width,height",
+      "-of", "csv=p=0:s=x",
+      inputPath,
+    ];
+    const p = spawn("ffprobe", args, { windowsHide: true });
+    let out = "";
+    p.stdout.on("data", (d) => { out += String(d || ""); });
+    p.once("error", () => resolve(null));
+    p.once("exit", (code) => {
+      if (code !== 0) return resolve(null);
+      const m = /(\d+)\s*x\s*(\d+)/i.exec(out);
+      if (!m) return resolve(null);
+      const width = Number(m[1] || 0);
+      const height = Number(m[2] || 0);
+      if (!(width > 0) || !(height > 0)) return resolve(null);
+      resolve({ width, height });
+    });
+    setTimeout(() => {
+      try {
+        p.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      resolve(null);
+    }, 2000);
+  });
+}
+
+function normalizeCursorMotionModeBackend(value) {
+  const v = String(value || "raw").toLowerCase();
+  return v === "linear" || v === "spline" ? v : "raw";
+}
+
+function normalizeCursorSplineGuideHzBackend(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 18;
+  return Math.max(1, Math.min(120, n));
+}
+
+function buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec) {
+  const eventList = Array.isArray(manifest?.events) ? manifest.events : [];
+  const captureBounds = manifest?.captureBounds && typeof manifest.captureBounds === "object"
+    ? manifest.captureBounds
+    : null;
+  const cursorOffsetX = Number(manifest?.cursorOffsetX || 0);
+  const cursorOffsetY = Number(manifest?.cursorOffsetY || 0);
+  const points = [];
+  for (let i = 0; i < eventList.length; i += 1) {
+    const evt = eventList[i];
+    const type = String(evt?.type || "");
+    if (type !== "mouse_move" && type !== "mouse_down" && type !== "mouse_up") continue;
+    if (evt?.inFrame === false) continue;
+    const tSecAbs = Number(evt?.t || 0) / 1000;
+    const tSec = tSecAbs - trimStartSec;
+    if (tSec < 0 || tSec > trimDurationSec) continue;
+    const xr = eventRatioFromManifest(evt, "x", captureBounds);
+    const yr = eventRatioFromManifest(evt, "y", captureBounds);
+    if (xr == null || yr == null) continue;
+    const x = Math.max(0, Math.min(dims.width - 1, xr * dims.width + cursorOffsetX));
+    const y = Math.max(0, Math.min(dims.height - 1, yr * dims.height + cursorOffsetY));
+    points.push({ tSec, x, y, type });
+  }
+  points.sort((a, b) => a.tSec - b.tSec);
+  return points;
+}
+
+function reduceKeyframes(points, maxCount) {
+  if (!Array.isArray(points) || points.length <= maxCount) return Array.isArray(points) ? points : [];
+  const stride = Math.max(1, Math.ceil(points.length / maxCount));
+  const out = [];
+  for (let i = 0; i < points.length; i += stride) {
+    out.push(points[i]);
+  }
+  if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+  return out;
+}
+
+function cursorKeyframeBudget(trimDurationSec, targetFps, mode = "raw") {
+  const fps = Math.max(1, Math.min(120, Number(targetFps || 30)));
+  const sec = Math.max(1, Math.min(4 * 60 * 60, Number(trimDurationSec || 1)));
+  const perSec = mode === "raw" ? 10 : Math.min(60, fps);
+  const desired = Math.ceil(sec * perSec);
+  const floor = mode === "raw" ? 240 : 600;
+  const ceiling = mode === "raw" ? 2400 : 12000;
+  return Math.max(floor, Math.min(ceiling, desired));
+}
+
+function ffmpegFilterPath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+}
+
+function buildCursorSendcmdScript(track, cursorHotspotX, cursorHotspotY, trimDurationSec) {
+  if (!Array.isArray(track) || !track.length) return "";
+  const lines = [];
+  for (let i = 0; i < track.length; i += 1) {
+    const kf = track[i];
+    const next = i + 1 < track.length ? track[i + 1] : null;
+    const startT = Math.max(0, Number(kf?.tSec || 0));
+    const endRaw = Number(next?.tSec ?? trimDurationSec);
+    const endT = Math.max(startT + 0.0005, Math.min(trimDurationSec, endRaw));
+    if (!(endT > startT)) continue;
+    const x = Number((Math.max(0, Number(kf?.x || 0) - cursorHotspotX)).toFixed(4));
+    const y = Number((Math.max(0, Number(kf?.y || 0) - cursorHotspotY)).toFixed(4));
+    lines.push(
+      `${startT.toFixed(6)}-${endT.toFixed(6)} `
+      + `overlay@cursor x '${x}',`
+      + `overlay@cursor y '${y}';`
+    );
+  }
+  return lines.join("\n");
+}
+
+function catmullRom1dBackend(p0, p1, p2, p3, u) {
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return 0.5 * (
+    (2 * p1)
+    + (-p0 + p2) * u
+    + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2
+    + (-p0 + 3 * p1 - 3 * p2 + p3) * u3
+  );
+}
+
+function splineAtBackend(anchors, tSec) {
+  if (!anchors.length) return null;
+  let lo = 0;
+  let hi = anchors.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (anchors[mid].tSec <= tSec) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best < 0) return { x: anchors[0].x, y: anchors[0].y };
+  if (best >= anchors.length - 1) {
+    const tail = anchors[anchors.length - 1];
+    return { x: tail.x, y: tail.y };
+  }
+  const p1 = anchors[Math.max(0, best)];
+  const p2 = anchors[Math.min(anchors.length - 1, best + 1)];
+  const p0 = anchors[Math.max(0, best - 1)];
+  const p3 = anchors[Math.min(anchors.length - 1, best + 2)];
+  if (Number(p2.tSec) <= Number(p1.tSec)) return { x: p1.x, y: p1.y };
+  const u = Math.max(0, Math.min(1, (tSec - Number(p1.tSec)) / (Number(p2.tSec) - Number(p1.tSec))));
+  return {
+    x: catmullRom1dBackend(p0.x, p1.x, p2.x, p3.x, u),
+    y: catmullRom1dBackend(p0.y, p1.y, p2.y, p3.y, u),
+  };
+}
+
+function buildCursorKeyframesBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps) {
+  const mode = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode);
+  const points = buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec);
+  if (!points.length) return [];
+  const budget = cursorKeyframeBudget(trimDurationSec, targetFps, mode);
+  if (mode === "raw") {
+    return reduceKeyframes(points, budget);
+  }
+  if (mode === "linear") {
+    return reduceKeyframes(points, budget);
+  }
+
+  const guideHz = normalizeCursorSplineGuideHzBackend(manifest?.cursorSplineGuideHz);
+  const stepSec = 1 / Math.max(1, guideHz);
+  const anchors = [];
+  let nextGuideT = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < points.length; i += 1) {
+    const p = points[i];
+    const isClick = p.type === "mouse_down" || p.type === "mouse_up";
+    if (!anchors.length) {
+      anchors.push({ tSec: p.tSec, x: p.x, y: p.y, click: isClick });
+      nextGuideT = p.tSec + stepSec;
+      continue;
+    }
+    if (isClick || p.tSec >= nextGuideT) {
+      anchors.push({ tSec: p.tSec, x: p.x, y: p.y, click: isClick });
+      nextGuideT = p.tSec + stepSec;
+    }
+  }
+  if (!anchors.length) return reduceKeyframes(points, budget);
+
+  const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
+  const sampleStep = 1 / sampleFps;
+  const sampled = [];
+  for (let t = 0; t <= trimDurationSec + 0.0001; t += sampleStep) {
+    const pos = splineAtBackend(anchors, t);
+    if (!pos) continue;
+    sampled.push({
+      tSec: Math.max(0, Math.min(trimDurationSec, t)),
+      x: Math.max(0, Math.min(dims.width - 1, Math.round(pos.x))),
+      y: Math.max(0, Math.min(dims.height - 1, Math.round(pos.y))),
+      type: "mouse_move",
+    });
+  }
+  if (!sampled.length) return reduceKeyframes(points, budget);
+  return reduceKeyframes(sampled, budget);
+}
+
+function buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps, guideHz) {
+  if (!points.length) return [];
+  if (mode === "raw") {
+    return reduceKeyframes(points, 280);
+  }
+  if (mode === "linear") {
+    return reduceKeyframes(points, 220);
+  }
+  const stepSec = 1 / Math.max(1, guideHz);
+  const anchors = [];
+  let nextGuideT = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < points.length; i += 1) {
+    const p = points[i];
+    const isClick = p.type === "mouse_down" || p.type === "mouse_up";
+    if (!anchors.length) {
+      anchors.push({ tSec: p.tSec, x: p.x, y: p.y, click: isClick });
+      nextGuideT = p.tSec + stepSec;
+      continue;
+    }
+    if (isClick || p.tSec >= nextGuideT) {
+      anchors.push({ tSec: p.tSec, x: p.x, y: p.y, click: isClick });
+      nextGuideT = p.tSec + stepSec;
+    }
+  }
+  if (!anchors.length) return reduceKeyframes(points, 220);
+  const sampleFps = Math.max(12, Math.min(60, Math.round(Number(targetFps || 30))));
+  const sampleStep = 1 / sampleFps;
+  const sampled = [];
+  for (let t = 0; t <= trimDurationSec + 0.0001; t += sampleStep) {
+    const pos = splineAtBackend(anchors, t);
+    if (!pos) continue;
+    sampled.push({
+      tSec: Math.max(0, Math.min(trimDurationSec, t)),
+      x: Math.max(0, Math.min(dims.width - 1, Math.round(pos.x))),
+      y: Math.max(0, Math.min(dims.height - 1, Math.round(pos.y))),
+      type: "mouse_move",
+    });
+  }
+  return sampled.length ? reduceKeyframes(sampled, 220) : reduceKeyframes(points, 220);
+}
+
+function buildCursorOverlayExpr(track, coord, hotspot, isRaw) {
+  if (!track.length) return "0";
+  const last = track[track.length - 1];
+  const defaultVal = Math.max(0, Number(last[coord]) - hotspot).toFixed(2);
+  const parts = [`st(0,${defaultVal})`];
+  for (let i = 0; i < track.length - 1; i += 1) {
+    const kf = track[i];
+    const next = track[i + 1];
+    const t0 = Number(kf.tSec);
+    const t1 = Number(next.tSec);
+    if (!(t1 > t0)) continue;
+    const v0 = Math.max(0, Number(kf[coord]) - hotspot);
+    if (isRaw) {
+      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(0,${v0.toFixed(2)}),0)`);
+    } else {
+      const v1 = Math.max(0, Number(next[coord]) - hotspot);
+      const rate = (v1 - v0) / (t1 - t0);
+      parts.push(`if(between(t,${t0.toFixed(4)},${t1.toFixed(4)}),st(0,${v0.toFixed(2)}+${rate.toFixed(4)}*(t-${t0.toFixed(4)})),0)`);
+    }
+  }
+  parts.push("ld(0)");
+  return parts.join(";");
+}
+
+function buildCursorCommandTrackBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps) {
+  const points = buildPointerEventsForBackend(manifest, dims, trimStartSec, trimDurationSec);
+  if (!points.length) return [];
+  const mode = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode);
+  const guideHz = normalizeCursorSplineGuideHzBackend(manifest?.cursorSplineGuideHz);
+  return buildSparseTrackBackend(points, mode, dims, trimDurationSec, targetFps, guideHz);
 }
 
 function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
@@ -1877,6 +2166,8 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   }
 
   const eventList = Array.isArray(manifest?.events) ? manifest.events : [];
+  const parsedCursor = parseDataUrlImage(manifest?.cursorTextureDataUrl);
+  const useCustomCursor = Boolean(parsedCursor && parsedCursor.buffer.length > 0);
   const fpsRaw = Number(manifest?.renderFps || 0);
   const targetFps = Number.isFinite(fpsRaw) && fpsRaw > 0
     ? Math.max(1, Math.min(240, fpsRaw))
@@ -1891,46 +2182,23 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   const cursorSize = 6;
   const cursorHalf = Math.floor(cursorSize / 2);
 
-  const pointerKeyframes = [];
-  let lastAddedT = -1;
-  let lastAddedX = Number.NaN;
-  let lastAddedY = Number.NaN;
-  for (let i = 0; i < eventList.length; i += 1) {
-    const evt = eventList[i];
-    const type = String(evt?.type || "");
-    if (type !== "mouse_move" && type !== "mouse_down" && type !== "mouse_up") continue;
-    if (evt?.inFrame === false) continue;
-    const tSecAbs = Number(evt?.t || 0) / 1000;
-    const tSec = tSecAbs - trimStartSec;
-    if (tSec < 0 || tSec > trimDurationSec) continue;
-    const xr = eventRatioFromManifest(evt, "x", captureBounds);
-    const yr = eventRatioFromManifest(evt, "y", captureBounds);
-    if (xr == null || yr == null) continue;
-    const x = Math.max(0, Math.min(dims.width - 1, Math.round(xr * dims.width + cursorOffsetX)));
-    const y = Math.max(0, Math.min(dims.height - 1, Math.round(yr * dims.height + cursorOffsetY)));
-    if (pointerKeyframes.length > 0) {
-      const dt = Math.abs(tSec - lastAddedT);
-      const dx = Math.abs(x - lastAddedX);
-      const dy = Math.abs(y - lastAddedY);
-      if (dt < 0.033 && dx < 2 && dy < 2) continue;
-    }
-    pointerKeyframes.push({ tSec, x, y });
-    lastAddedT = tSec;
-    lastAddedX = x;
-    lastAddedY = y;
-    if (pointerKeyframes.length >= 1500) break;
-  }
+  const pointerKeyframes = buildCursorKeyframesBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps);
+  const cursorCommandTrack = useCustomCursor
+    ? buildCursorCommandTrackBackend(manifest, dims, trimStartSec, trimDurationSec, targetFps)
+    : [];
 
   const overlayFilters = [];
-  for (let i = 0; i < pointerKeyframes.length; i += 1) {
-    const kf = pointerKeyframes[i];
-    const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
-    if (!(nextT > kf.tSec)) continue;
-    const x = Math.max(0, kf.x - cursorHalf);
-    const y = Math.max(0, kf.y - cursorHalf);
-    overlayFilters.push(
-      `drawbox=x=${x}:y=${y}:w=${cursorSize}:h=${cursorSize}:color=white@0.95:t=fill:enable='between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)})'`
-    );
+  if (!useCustomCursor) {
+    for (let i = 0; i < pointerKeyframes.length; i += 1) {
+      const kf = pointerKeyframes[i];
+      const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
+      if (!(nextT > kf.tSec)) continue;
+      const x = Math.max(0, kf.x - cursorHalf);
+      const y = Math.max(0, kf.y - cursorHalf);
+      overlayFilters.push(
+        `drawbox=x=${x}:y=${y}:w=${cursorSize}:h=${cursorSize}:color=white@0.95:t=fill:enable='between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)})'`
+      );
+    }
   }
 
   let clickCount = 0;
@@ -1977,11 +2245,26 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   }
   args.push("-i", inputPath);
   let cursorImagePath = "";
-  const parsedCursor = parseDataUrlImage(manifest?.cursorTextureDataUrl);
   if (parsedCursor && parsedCursor.buffer.length > 0) {
-    cursorImagePath = path.join(tmpDir, `cursor${extForMimeType(parsedCursor.mimeType)}`);
-    await fs.writeFile(cursorImagePath, parsedCursor.buffer);
-    args.push("-loop", "1", "-i", cursorImagePath);
+    const candidatePath = path.join(tmpDir, `cursor${extForMimeType(parsedCursor.mimeType)}`);
+    await fs.writeFile(candidatePath, parsedCursor.buffer);
+    const probed = await probeMediaDimensions(candidatePath);
+    const maxCursorSide = 512;
+    const maxCursorArea = 512 * 512;
+    const looksReasonableCursor = Boolean(
+      probed
+      && probed.width > 0
+      && probed.height > 0
+      && probed.width <= maxCursorSide
+      && probed.height <= maxCursorSide
+      && (probed.width * probed.height) <= maxCursorArea
+      && probed.width <= Math.max(16, Math.floor(dims.width * 0.6))
+      && probed.height <= Math.max(16, Math.floor(dims.height * 0.6))
+    );
+    if (looksReasonableCursor) {
+      cursorImagePath = candidatePath;
+      args.push("-loop", "1", "-i", cursorImagePath);
+    }
   }
   if (hasTrimEnd) {
     args.push("-to", trimEndSecRaw.toFixed(3));
@@ -1989,18 +2272,12 @@ async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tm
   if (vfParts.length || cursorImagePath) {
     const baseChain = vfParts.length ? vfParts.join(",") : "null";
     let graph = `[0:v]${baseChain}[basev]`;
-    if (cursorImagePath && pointerKeyframes.length > 0) {
-      let xExpr = "0";
-      let yExpr = "0";
-      for (let i = pointerKeyframes.length - 1; i >= 0; i -= 1) {
-        const kf = pointerKeyframes[i];
-        const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
-        const x = Math.max(0, Math.round(kf.x - cursorHotspotX));
-        const y = Math.max(0, Math.round(kf.y - cursorHotspotY));
-        xExpr = `if(between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)}),${x},(${xExpr}))`;
-        yExpr = `if(between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)}),${y},(${yExpr}))`;
-      }
-      graph += `;[1:v]format=rgba[cursorv];[basev][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[vout]`;
+    if (cursorImagePath && cursorCommandTrack.length > 0) {
+      const isRaw = normalizeCursorMotionModeBackend(manifest?.cursorMotionMode) === "raw";
+      const xExpr = buildCursorOverlayExpr(cursorCommandTrack, "x", cursorHotspotX, isRaw);
+      const yExpr = buildCursorOverlayExpr(cursorCommandTrack, "y", cursorHotspotY, isRaw);
+      graph += `;[1:v]format=rgba,setpts=PTS-STARTPTS[cursorv]`;
+      graph += `;[basev][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[vout]`;
     } else {
       graph += ";[basev]copy[vout]";
     }

@@ -61,6 +61,7 @@ let importedVideoUrl = "";
 let importedVideoBlob = null;
 let rafId = 0;
 let isSeeking = false;
+let isFinalExportInProgress = false;
 let previewFrameCanvas = null;
 let previewFrameCtx = null;
 let composeCanvas = null;
@@ -2448,7 +2449,17 @@ async function exportFinalVideo() {
     return;
   }
 
+  const wasPlayingBeforeExport = Boolean(videoEl.src && !videoEl.paused);
+  isFinalExportInProgress = true;
+  stopRenderLoop();
+  try {
+    videoEl.pause();
+  } catch {
+    // ignore
+  }
   exportFinalBtn.disabled = true;
+  playPauseBtn.disabled = true;
+  seekBar.disabled = true;
   setStatus("Exporting final video with effects...");
 
   const hasTimelineEffects = (project.zooms?.length || 0) > 0 || (project.texts?.length || 0) > 0;
@@ -2566,10 +2577,22 @@ async function exportFinalVideo() {
         body: JSON.stringify({ mezzanineId }),
       }).catch(() => {});
     }
+    isFinalExportInProgress = false;
     exportFinalBtn.disabled = false;
+    refreshActionButtons();
+    if (videoEl.src) {
+      if (wasPlayingBeforeExport) {
+        videoEl.play().catch(() => {});
+      } else if (videoEl.paused) {
+        renderOverlay();
+      } else {
+        startRenderLoop();
+      }
+    }
   }
 }
 function renderOverlay() {
+  if (isFinalExportInProgress) return;
   if (!videoEl.src) return;
 
   fitCanvasToVideo();
@@ -2599,6 +2622,7 @@ function renderOverlay() {
 }
 
 function startRenderLoop() {
+  if (isFinalExportInProgress) return;
   cancelAnimationFrame(rafId);
   keyPill.classList.add("hidden");
   videoEl.style.visibility = "hidden";
@@ -2848,7 +2872,11 @@ async function tryDesktopDeterministicFrameExport({
     const startJson = await startResp.json();
     perf.startReqMs = Math.max(0, performance.now() - startReqStart);
     jobId = String(startJson?.jobId || "");
+    const videoEncoder = String(startJson?.videoEncoder || "");
     if (!jobId) return { blob: null, reason: "desktop did not return jobId" };
+    if (videoEncoder) {
+      console.log("[export-config]", `video_encoder=${videoEncoder}`);
+    }
 
     exportVideo.pause();
 

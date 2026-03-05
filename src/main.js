@@ -27,6 +27,7 @@ let latestSaved = {
 };
 const frameExportJobs = new Map();
 const mezzanineJobs = new Map();
+let availableVideoEncodersPromise = null;
 
 const editorRoot = path.resolve(__dirname, "..", "editor");
 const appLogoPath = path.resolve(__dirname, "..", "logo.svg");
@@ -696,6 +697,7 @@ async function ensureEditorServer() {
           const frameFormat = frameFormatRaw === "jpeg" || frameFormatRaw === "png" ? frameFormatRaw : "raw";
           const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-frame-export-"));
           const includeDesktopAudio = Boolean(body?.includeDesktopAudio && latestSaved.videoPath);
+          const videoEncoder = await preferredDeterministicVideoEncoder();
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
           const outputPath = path.join(tmpDir, "final.mp4");
           const args = ["-y"];
@@ -730,22 +732,8 @@ async function ensureEditorServer() {
             args.push("-map", "0:v:0");
           }
           args.push("-r", String(fps), "-vsync", "cfr");
-          args.push(
-            "-c:v",
-            "libx264",
-            "-preset",
-            "superfast",
-            "-tune",
-            "zerolatency",
-            "-x264-params",
-            "bframes=0:rc-lookahead=0:sync-lookahead=0",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-          );
+          pushDeterministicVideoEncoderArgs(args, videoEncoder);
+          args.push("-pix_fmt", "yuv420p", "-movflags", "+faststart");
           if (includeDesktopAudio) {
             args.push("-c:a", "aac", "-b:a", "160k");
           }
@@ -786,12 +774,13 @@ async function ensureEditorServer() {
             frameWidth,
             frameHeight,
             frameFormat,
+            videoEncoder,
             frameMaxBytes: frameFormat === "jpeg" || frameFormat === "png"
               ? 16 * 1024 * 1024
               : Math.max(1024, frameWidth * frameHeight * 4 + 4096),
           });
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ ok: true, jobId }));
+          res.end(JSON.stringify({ ok: true, jobId, videoEncoder }));
         } catch (err) {
           res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: false, error: err?.message || "Could not start frame export job" }));
@@ -1708,6 +1697,72 @@ async function verifyFfmpegAvailable() {
       else reject(new Error("ffmpeg is not available on PATH"));
     });
   });
+}
+
+async function availableVideoEncoders() {
+  if (!availableVideoEncodersPromise) {
+    availableVideoEncodersPromise = new Promise((resolve, reject) => {
+      const proc = spawn("ffmpeg", ["-hide_banner", "-encoders"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      proc.stdout.on("data", (d) => {
+        out += String(d || "");
+      });
+      proc.stderr.on("data", (d) => {
+        out += String(d || "");
+      });
+      proc.once("error", reject);
+      proc.once("exit", (code) => {
+        if (code !== 0) {
+          reject(new Error("Could not read ffmpeg encoder list"));
+          return;
+        }
+        const found = new Set();
+        for (const m of out.matchAll(/\b(h264_mf|h264_nvenc|h264_qsv|libx264)\b/g)) {
+          found.add(String(m[1]));
+        }
+        resolve(found);
+      });
+    }).catch((err) => {
+      availableVideoEncodersPromise = null;
+      throw err;
+    });
+  }
+  return await availableVideoEncodersPromise;
+}
+
+async function preferredDeterministicVideoEncoder() {
+  const encoders = await availableVideoEncoders().catch(() => new Set(["libx264"]));
+  const order = process.platform === "win32"
+    ? ["h264_mf", "h264_nvenc", "h264_qsv", "libx264"]
+    : ["h264_nvenc", "h264_qsv", "libx264"];
+  for (const encoder of order) {
+    if (encoders.has(encoder)) return encoder;
+  }
+  return "libx264";
+}
+
+function pushDeterministicVideoEncoderArgs(args, encoder) {
+  args.push("-c:v", encoder);
+  if (encoder === "libx264") {
+    args.push(
+      "-preset",
+      "superfast",
+      "-tune",
+      "zerolatency",
+      "-x264-params",
+      "bframes=0:rc-lookahead=0:sync-lookahead=0",
+      "-crf",
+      "18"
+    );
+    return;
+  }
+  if (encoder === "h264_nvenc") {
+    args.push("-preset", "p5", "-cq", "18", "-b:v", "0");
+    return;
+  }
+  if (encoder === "h264_qsv") {
+    args.push("-global_quality", "18");
+  }
 }
 
 function ffmpegArgsFor(bounds, outputPath, hideNativeCursor, captureFps = 30) {

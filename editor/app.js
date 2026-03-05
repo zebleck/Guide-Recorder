@@ -1517,18 +1517,47 @@ const cursorSplineTrackCache = {
   anchors: [],
 };
 
+const pointerEventTrackCache = {
+  key: "",
+  indices: [],
+};
+
 function findPrevPointerEventIndex(evts, startIndex) {
-  for (let i = Math.max(0, Number(startIndex || 0)); i >= 0; i -= 1) {
-    if (isPointerEventType(evts[i]?.type)) return i;
+  const start = Math.max(0, Number(startIndex || 0));
+  const indices = getPointerEventIndices();
+  let lo = 0;
+  let hi = indices.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const idx = indices[mid];
+    if (idx <= start) {
+      best = idx;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  return -1;
+  return best;
 }
 
 function findNextPointerEventIndex(evts, startIndex) {
-  for (let i = Math.max(0, Number(startIndex || 0)); i < evts.length; i += 1) {
-    if (isPointerEventType(evts[i]?.type)) return i;
+  const start = Math.max(0, Number(startIndex || 0));
+  const indices = getPointerEventIndices();
+  let lo = 0;
+  let hi = indices.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const idx = indices[mid];
+    if (idx >= start) {
+      best = idx;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
   }
-  return -1;
+  return best;
 }
 
 function tryPinnedClickPosition(currentMs, centerIdx, evts, toPos) {
@@ -1582,6 +1611,27 @@ function cursorSplineCacheKey(guideHz) {
     Number(cb.width || 0),
     Number(cb.height || 0),
   ].join("|");
+}
+
+function pointerEventCacheKey() {
+  const evts = project.events;
+  const last = evts.length ? evts[evts.length - 1] : null;
+  return `${evts.length}|${Number(last?.t || 0).toFixed(3)}`;
+}
+
+function getPointerEventIndices() {
+  const key = pointerEventCacheKey();
+  if (pointerEventTrackCache.key === key) return pointerEventTrackCache.indices;
+  const evts = project.events;
+  const indices = [];
+  for (let i = 0; i < evts.length; i += 1) {
+    if (isPointerEventType(evts[i]?.type)) {
+      indices.push(i);
+    }
+  }
+  pointerEventTrackCache.key = key;
+  pointerEventTrackCache.indices = indices;
+  return indices;
 }
 
 function pushSplineAnchor(anchors, t, x, y, isClick = false) {
@@ -2013,37 +2063,22 @@ function drawKeyPillEventOn(renderCtx, keyDown, currentMs, width) {
 function collectFrameOverlayState(currentMs, width, height) {
   const evts = project.events;
   const hi = bisectEvents(currentMs);
-  const heldSince = { 0: null, 2: null };
-  let found0 = false;
-  let found2 = false;
   let keyDown = null;
   let pointer = pointerAtForExport(currentMs, width, height);
   const minKeyMs = currentMs - 1000;
 
   for (let i = hi; i >= 0; i -= 1) {
     const evt = evts[i];
-    if (!keyDown && evt.type === "key_down") keyDown = evt;
-
-    if (!found0 || !found2) {
-      if ((evt.type === "mouse_up" || evt.type === "mouse_down") && (evt.button === 0 || evt.button === 2)) {
-        if (evt.button === 0 && !found0) {
-          heldSince[0] = evt.type === "mouse_down" ? evt.t : null;
-          found0 = true;
-        } else if (evt.button === 2 && !found2) {
-          heldSince[2] = evt.type === "mouse_down" ? evt.t : null;
-          found2 = true;
-        }
-      }
-    }
-
-    if ((pointer && found0 && found2 && keyDown) || (pointer && found0 && found2 && evt.t < minKeyMs)) {
+    if (!keyDown && evt.type === "key_down") {
+      keyDown = evt;
       break;
     }
+    if (evt.t < minKeyMs) break;
   }
 
   return {
     pointer,
-    heldSince,
+    heldSince: { 0: null, 2: null },
     keyDown,
     clickHi: hi,
     clickLo: bisectEvents(currentMs - 460),
@@ -2277,7 +2312,7 @@ function drawZoomedVideoGpu(renderCtx, sourceLike, zoomViewport, width, height) 
   }
 }
 
-function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) {
+function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height, options = {}) {
   renderCtx.imageSmoothingEnabled = true;
   renderCtx.imageSmoothingQuality = "high";
   const src = sourceDimensions(sourceVideo, width, height);
@@ -2290,7 +2325,8 @@ function drawZoomedVideoOn(renderCtx, sourceVideo, zoomViewport, width, height) 
     renderCtx.drawImage(sourceVideo, 0, 0, width, height);
     return;
   }
-  const drewViaGpu = drawZoomedVideoGpu(renderCtx, sourceVideo, zoomViewport, width, height);
+  const allowGpu = options.useGpu !== false;
+  const drewViaGpu = allowGpu ? drawZoomedVideoGpu(renderCtx, sourceVideo, zoomViewport, width, height) : false;
   if (drewViaGpu) return;
   renderCtx.drawImage(
     sourceVideo,
@@ -2355,7 +2391,7 @@ function renderExportFrame(
   currentMs,
   width,
   height,
-  _options = {},
+  options = {},
 ) {
   const sourceW = Math.max(2, Number(sourceVideo?.videoWidth || width || 0));
   const sourceH = Math.max(2, Number(sourceVideo?.videoHeight || height || 0));
@@ -2374,7 +2410,7 @@ function renderExportFrame(
     renderCtx.clearRect(0, 0, width, height);
     renderCtx.fillStyle = "#000";
     renderCtx.fillRect(0, 0, width, height);
-    drawZoomedVideoOn(renderCtx, sourceVideo, null, width, height);
+    drawZoomedVideoOn(renderCtx, sourceVideo, null, width, height, { useGpu: options.useGpuZoom !== false });
     drawClickBurstsOn(renderCtx, currentMs, sourceW, sourceH, null, {
       hi: overlayState.clickHi,
       lo: overlayState.clickLo,
@@ -2391,7 +2427,7 @@ function renderExportFrame(
   composed.ctx.clearRect(0, 0, sourceW, sourceH);
   composed.ctx.fillStyle = "#000";
   composed.ctx.fillRect(0, 0, sourceW, sourceH);
-  drawZoomedVideoOn(composed.ctx, sourceVideo, null, sourceW, sourceH);
+  drawZoomedVideoOn(composed.ctx, sourceVideo, null, sourceW, sourceH, { useGpu: options.useGpuZoom !== false });
   drawClickBurstsOn(composed.ctx, currentMs, sourceW, sourceH, null, {
     hi: overlayState.clickHi,
     lo: overlayState.clickLo,
@@ -2402,7 +2438,7 @@ function renderExportFrame(
   renderCtx.clearRect(0, 0, width, height);
   renderCtx.fillStyle = "#000";
   renderCtx.fillRect(0, 0, width, height);
-  drawZoomedVideoOn(renderCtx, composed.canvas, zoomViewport, width, height);
+  drawZoomedVideoOn(renderCtx, composed.canvas, zoomViewport, width, height, { useGpu: options.useGpuZoom !== false });
 
   // Pass 3: draw screen-fixed overlays on top of zoomed frame.
   drawKeyPillEventOn(renderCtx, overlayState.keyDown, currentMs, width);
@@ -2464,7 +2500,14 @@ async function exportFinalVideo() {
 
   const hasTimelineEffects = (project.zooms?.length || 0) > 0 || (project.texts?.length || 0) > 0;
   const hasInteractionOverlays = (project.events?.length || 0) > 0;
-  if (!hasTimelineEffects && !hasInteractionOverlays) {
+  setStatus("Trying backend-native renderer...");
+  const backendMp4 = await tryDesktopBackendRenderJob();
+  if (backendMp4) {
+    downloadBlob(backendMp4, "guide-recorder-final.mp4");
+    setStatus("Final video exported with backend-native renderer.");
+    return;
+  }
+  if (!hasTimelineEffects && !hasInteractionOverlays && !isDesktopAutoloadVideoSource()) {
     const desktopMp4 = await tryDesktopExportJob();
     if (desktopMp4) {
       downloadBlob(desktopMp4, "guide-recorder-final.mp4");
@@ -2473,6 +2516,7 @@ async function exportFinalVideo() {
       return;
     }
   }
+  setStatus("Backend-native renderer fallback to deterministic renderer...");
 
   let exportVideo = null;
   let mezzanineId = "";
@@ -2723,6 +2767,131 @@ function canvasToBlob(canvasEl, type, quality) {
   });
 }
 
+async function tryDesktopBackendRenderJob() {
+  const usingDesktopSource = isDesktopAutoloadVideoSource();
+  const fpsMode = normalizeRenderFpsMode(project.renderFpsMode);
+  const selectedFps = fpsMode === "custom"
+    ? normalizeRenderFpsValue(project.renderFpsValue)
+    : await preferredDeterministicFps(videoEl).catch(() => 60);
+  const payload = {
+    trimStartSec: Number(project.trimStartSec || 0),
+    trimEndSec: Number(project.trimEndSec || 0),
+    aspectPreset: normalizeAspectPreset(project.aspectPreset),
+    zoomCount: Array.isArray(project.zooms) ? project.zooms.length : 0,
+    textCount: Array.isArray(project.texts) ? project.texts.length : 0,
+    eventCount: Array.isArray(project.events) ? project.events.length : 0,
+    events: Array.isArray(project.events) ? project.events : [],
+    zooms: Array.isArray(project.zooms) ? project.zooms : [],
+    texts: Array.isArray(project.texts) ? project.texts : [],
+    cursorOffsetX: Number(project.cursorOffsetX || 0),
+    cursorOffsetY: Number(project.cursorOffsetY || 0),
+    cursorHotspotX: Number(project.cursorHotspotX || 0),
+    cursorHotspotY: Number(project.cursorHotspotY || 0),
+    cursorTextureDataUrl: String(project.cursorTextureDataUrl || ""),
+    renderFpsMode: fpsMode,
+    renderFps: Math.max(1, Math.min(240, Number(selectedFps || 60))),
+    captureBounds: project.captureBounds && typeof project.captureBounds === "object"
+      ? {
+          x: Number(project.captureBounds.x || 0),
+          y: Number(project.captureBounds.y || 0),
+          width: Number(project.captureBounds.width || 0),
+          height: Number(project.captureBounds.height || 0),
+        }
+      : null,
+  };
+  let mezzanineId = "";
+  try {
+    if (!usingDesktopSource) {
+      const sourceUrl = String(videoEl.currentSrc || videoEl.src || "");
+      const sourceBlob = importedVideoBlob
+        ? importedVideoBlob
+        : await (async () => {
+          const sourceResp = await fetch(sourceUrl);
+          if (!sourceResp.ok) {
+            throw new Error(`Could not read loaded source video (${sourceResp.status})`);
+          }
+          return await sourceResp.blob();
+        })();
+      if (!sourceBlob || sourceBlob.size <= 0) {
+        throw new Error("Loaded source video is empty");
+      }
+      const mezzResp = await fetch("/__desktop/export/mezzanine/start", {
+        method: "POST",
+        headers: { "Content-Type": sourceBlob.type || "application/octet-stream" },
+        body: sourceBlob,
+      });
+      if (!mezzResp.ok) {
+        let errText = "";
+        try {
+          const errJson = await mezzResp.json();
+          errText = String(errJson?.error || "");
+        } catch {
+          // ignore parse failure
+        }
+        console.warn("[backend-render] failed", `status=${mezzResp.status}`, errText || "(mezzanine build failed)");
+        return null;
+      }
+      const mezzJson = await mezzResp.json();
+      mezzanineId = String(mezzJson?.mezzanineId || "");
+      if (!mezzanineId) {
+        console.warn("[backend-render] failed: missing mezzanineId");
+        return null;
+      }
+      payload.mezzanineId = mezzanineId;
+    }
+    const reqStart = performance.now();
+    const resp = await fetch("/__desktop/export/backend/job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      let errText = "";
+      try {
+        const errJson = await resp.json();
+        errText = String(errJson?.error || "");
+      } catch {
+        // ignore parse failure
+      }
+      console.warn("[backend-render] failed", `status=${resp.status}`, errText || "(no error body)");
+      return null;
+    }
+    const renderer = String(resp.headers.get("X-Guide-Renderer") || "backend-worker");
+    const effectsMode = String(resp.headers.get("X-Guide-Renderer-Effects") || "unknown");
+    const durationMsHeader = Number(resp.headers.get("X-Guide-Renderer-Duration-Ms") || 0);
+    const lastProgress = String(resp.headers.get("X-Guide-Renderer-Last-Progress") || "");
+    const blob = await resp.blob();
+    if (!blob || blob.size <= 0) return null;
+    const elapsedMs = Math.max(0, performance.now() - reqStart);
+    const durationLabel = Number.isFinite(durationMsHeader) && durationMsHeader > 0
+      ? `${durationMsHeader}ms`
+      : `${elapsedMs.toFixed(0)}ms`;
+    console.log(
+      "[backend-render]",
+      `renderer=${renderer}`,
+      `effects=${effectsMode}`,
+      `duration_ms=${durationLabel}`,
+      lastProgress ? `last_progress=${lastProgress}` : ""
+    );
+    setStatus(
+      `Backend renderer: ${renderer} (effects=${effectsMode}) `
+      + `done in ${durationLabel}${lastProgress ? ` | ${lastProgress}` : ""}`
+    );
+    return new Blob([blob], { type: "video/mp4" });
+  } catch {
+    console.warn("[backend-render] failed: request threw");
+    return null;
+  } finally {
+    if (mezzanineId) {
+      fetch("/__desktop/export/mezzanine/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ mezzanineId }),
+      }).catch(() => {});
+    }
+  }
+}
+
 function formatPerfMs(ms, divisor = 1) {
   const safeDiv = Math.max(1, Number(divisor || 1));
   return (Number(ms || 0) / safeDiv).toFixed(1);
@@ -2812,13 +2981,13 @@ async function tryDesktopDeterministicFrameExport({
   const fps = fpsMode === "custom"
     ? normalizeRenderFpsValue(project.renderFpsValue)
     : await preferredDeterministicFps(exportVideo);
+  const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   const frameMimeType = frameFormat === "jpeg"
     ? "image/jpeg"
     : frameFormat === "png"
       ? "image/png"
       : "application/octet-stream";
   const frameEncodeQuality = frameFormat === "jpeg" ? 0.95 : undefined;
-  const totalFrames = Math.max(1, Math.round(targetDurationSec * fps));
   if (totalFrames > DETERMINISTIC_EXPORT_MAX_FRAMES) {
     return {
       blob: null,
@@ -2828,6 +2997,8 @@ async function tryDesktopDeterministicFrameExport({
 
   let jobId = "";
   let chunkVideo = null;
+  let frameCanvas = exportCanvas;
+  let frameCtx = exportCtx;
   try {
     const sourceUrl = String(exportVideo.currentSrc || exportVideo.src || "");
     if (!sourceUrl) {
@@ -2915,9 +3086,19 @@ async function tryDesktopDeterministicFrameExport({
       await seekVideoForFrame(v, sec);
       return v;
     };
+    const rebuildFrameCanvas = () => {
+      const c = document.createElement("canvas");
+      c.width = width;
+      c.height = height;
+      const cctx = c.getContext("2d", { willReadFrequently: true });
+      if (!cctx) throw new Error("Could not acquire export canvas context");
+      frameCanvas = c;
+      frameCtx = cctx;
+    };
 
     setStatus(`Deterministic export started. Rendering frames 0/${totalFrames}...`);
-    const CHUNK_FRAMES = 120;
+    // Periodically recreate the source <video> to release decoder-side memory over long exports.
+    const CHUNK_FRAMES = 180;
     let currentVideo = exportVideo;
     const canDecodeStep = typeof currentVideo.requestVideoFrameCallback === "function";
     let decodeStepFailed = false;
@@ -2929,14 +3110,20 @@ async function tryDesktopDeterministicFrameExport({
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
       const targetSec = trimStartSec + (frameIndex / fps);
       const usingSeekMode = !canDecodeStep || decodeStepFailed;
-      if (usingSeekMode && frameIndex > 0 && frameIndex % CHUNK_FRAMES === 0) {
+      if (frameIndex > 0 && frameIndex % CHUNK_FRAMES === 0) {
         const rebuildStart = performance.now();
+        if (inFlightUploads.size > 0) {
+          const waitStart = performance.now();
+          await Promise.all(Array.from(inFlightUploads));
+          perf.uploadWaitMs += Math.max(0, performance.now() - waitStart);
+        }
         const nextVideo = await createChunkVideoAt(targetSec);
         if (currentVideo !== exportVideo) {
           disposeVideoElement(currentVideo);
         }
         currentVideo = nextVideo;
         chunkVideo = nextVideo;
+        rebuildFrameCanvas();
         perf.seekMs += Math.max(0, performance.now() - rebuildStart);
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
@@ -2959,15 +3146,15 @@ async function tryDesktopDeterministicFrameExport({
 
       const renderMs = targetSec * 1000;
       const drawStart = performance.now();
-      renderExportFrame(exportCtx, currentVideo, renderMs, width, height);
+      renderExportFrame(frameCtx, currentVideo, renderMs, width, height, { useGpuZoom: false });
       perf.renderMs += Math.max(0, performance.now() - drawStart);
       const encodeStart = performance.now();
       let encodedFrame = null;
       if (frameFormat === "raw") {
-        const pixels = exportCtx.getImageData(0, 0, width, height);
+        const pixels = frameCtx.getImageData(0, 0, width, height);
         encodedFrame = pixels.data;
       } else {
-        encodedFrame = await canvasToBlob(exportCanvas, frameMimeType, frameEncodeQuality);
+        encodedFrame = await canvasToBlob(frameCanvas, frameMimeType, frameEncodeQuality);
       }
       perf.encodeMs += Math.max(0, performance.now() - encodeStart);
       await waitForFreeUploadSlot();
@@ -3061,6 +3248,10 @@ async function tryDesktopDeterministicFrameExport({
         headers: { "Content-Type": "application/json; charset=utf-8" },
         body: JSON.stringify({ jobId }),
       }).catch(() => {});
+    }
+    if (frameCanvas) {
+      frameCanvas.width = 1;
+      frameCanvas.height = 1;
     }
   }
 }

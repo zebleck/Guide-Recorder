@@ -3,7 +3,7 @@ const fsNative = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const http = require("node:http");
-const { spawn } = require("node:child_process");
+const { spawn, fork } = require("node:child_process");
 const os = require("node:os");
 
 // Windows: avoid noisy/unstable WGC capture path and Chromium log spam.
@@ -640,6 +640,76 @@ async function ensureEditorServer() {
           await safeRemoveDir(tmpDir);
           res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: false, error: err?.message || "Desktop export failed" }));
+        }
+        return;
+      }
+
+      if (pathname === "/__desktop/export/backend/job" && req.method === "POST") {
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "guide-recorder-backend-export-"));
+        const outputPath = path.join(tmpDir, "final.mp4");
+        try {
+          const manifest = await readJsonBody(req);
+          await verifyFfmpegAvailable();
+          const mezzanineId = String(manifest?.mezzanineId || "");
+          let inputPath = latestSaved.videoPath;
+          if (mezzanineId) {
+            const job = mezzanineJobs.get(mezzanineId);
+            if (!job?.outputPath) {
+              throw new Error("Invalid mezzanineId for backend export");
+            }
+            inputPath = job.outputPath;
+          }
+          if (!inputPath) {
+            throw new Error("No source video available for backend export");
+          }
+          const startedAt = Date.now();
+          let lastProgressLine = "";
+          const dims = await probeVideoDimensions(inputPath);
+          const args = await ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tmpDir);
+          await runFfmpegWithRenderWorker(
+            args,
+            (msg) => {
+              if (!msg?.line) return;
+              lastProgressLine = String(msg.line).trim();
+              console.log("[backend-render-progress]", lastProgressLine);
+            },
+            60 * 60 * 1000,
+            {
+              mode: "backend-export",
+              effects: {
+                events: Array.isArray(manifest?.events) ? manifest.events.length : 0,
+                zooms: Array.isArray(manifest?.zooms) ? manifest.zooms.length : 0,
+                texts: Array.isArray(manifest?.texts) ? manifest.texts.length : 0,
+                cursorOffsetX: Number(manifest?.cursorOffsetX || 0),
+                cursorOffsetY: Number(manifest?.cursorOffsetY || 0),
+                cursorHotspotX: Number(manifest?.cursorHotspotX || 0),
+                cursorHotspotY: Number(manifest?.cursorHotspotY || 0),
+              },
+            }
+          );
+          const stat = await fs.stat(outputPath);
+          const durationMs = Math.max(0, Date.now() - startedAt);
+          res.writeHead(200, {
+            "Content-Type": "video/mp4",
+            "Content-Length": String(Number(stat.size || 0)),
+            "Cache-Control": "no-store",
+            "X-Guide-Renderer": "backend-worker",
+            "X-Guide-Renderer-Effects": "cursor-clicks-zoom-cursor-v1",
+            "X-Guide-Renderer-Duration-Ms": String(durationMs),
+            "X-Guide-Renderer-Last-Progress": lastProgressLine ? lastProgressLine.slice(0, 180) : "",
+          });
+          const stream = fsNative.createReadStream(outputPath);
+          stream.on("error", () => {
+            if (!res.headersSent) res.writeHead(500);
+            res.end("Backend export stream failed");
+          });
+          stream.pipe(res);
+          attachTmpDirCleanup(res, tmpDir);
+        } catch (err) {
+          await safeRemoveDir(tmpDir);
+          const msg = String(err?.message || "Backend export failed");
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: msg }));
         }
         return;
       }
@@ -1688,6 +1758,286 @@ function ffmpegArgsEditorExport(inputPath, outputPath, manifest, dims) {
   return args;
 }
 
+function eventRatioFromManifest(evt, axis, captureBounds) {
+  const ratioKey = axis === "x" ? "xPct" : "yPct";
+  const raw = Number(evt?.[ratioKey]);
+  if (Number.isFinite(raw)) {
+    if (Math.abs(raw) > 1.5) return Math.max(0, Math.min(1, raw / 100));
+    return Math.max(0, Math.min(1, raw));
+  }
+  const b = captureBounds && typeof captureBounds === "object" ? captureBounds : null;
+  if (!b || !Number.isFinite(Number(b.width)) || !Number.isFinite(Number(b.height)) || Number(b.width) <= 0 || Number(b.height) <= 0) {
+    return null;
+  }
+  const screenKey = axis === "x" ? "xScreen" : "yScreen";
+  const fallbackKey = axis === "x" ? "x" : "y";
+  const v = Number.isFinite(Number(evt?.[screenKey])) ? Number(evt[screenKey]) : Number(evt?.[fallbackKey]);
+  if (!Number.isFinite(v)) return null;
+  const base = axis === "x" ? Number(b.x || 0) : Number(b.y || 0);
+  const size = axis === "x" ? Number(b.width || 0) : Number(b.height || 0);
+  if (!(size > 0)) return null;
+  return Math.max(0, Math.min(1, (v - base) / size));
+}
+
+function parseDataUrlImage(dataUrl) {
+  const raw = String(dataUrl || "").trim();
+  const m = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,([\s\S]*)$/i.exec(raw);
+  if (!m) return null;
+  const mimeType = String(m[1] || "application/octet-stream").toLowerCase();
+  const isBase64 = Boolean(m[2]);
+  const body = String(m[3] || "");
+  try {
+    const buffer = isBase64
+      ? Buffer.from(body, "base64")
+      : Buffer.from(decodeURIComponent(body), "utf8");
+    if (!buffer.length) return null;
+    return { mimeType, buffer };
+  } catch {
+    return null;
+  }
+}
+
+function extForMimeType(mimeType) {
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
+  if (mime.includes("bmp")) return ".bmp";
+  return ".img";
+}
+
+function buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec) {
+  const zooms = Array.isArray(manifest?.zooms) ? manifest.zooms : [];
+  if (!zooms.length) return "1";
+
+  // Heuristic: if zoom times exceed trimmed duration, treat them as absolute media timeline.
+  let hasBeyondTrimmedRange = false;
+  for (const z of zooms) {
+    const s = Number(z?.startSec || 0);
+    const e = Number(z?.endSec || 0);
+    if (s > trimDurationSec + 0.5 || e > trimDurationSec + 0.5) {
+      hasBeyondTrimmedRange = true;
+      break;
+    }
+  }
+  const baseShift = hasBeyondTrimmedRange ? trimStartSec : 0;
+
+  const normalized = [];
+  for (const z of zooms) {
+    const rawStart = Number(z?.startSec || 0) - baseShift;
+    const rawEnd = Number(z?.endSec || 0) - baseShift;
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) continue;
+    const startSec = Math.max(0, rawStart);
+    const endSec = Math.min(trimDurationSec, rawEnd);
+    if (!(endSec > startSec)) continue;
+    const durSec = endSec - startSec;
+    const targetScale = Math.max(1, Number(z?.scale || 1));
+    const easeSecRaw = Math.max(0, Number(z?.easeMs || 0)) / 1000;
+    const easeSec = Math.min(easeSecRaw, durSec * 0.5);
+    normalized.push({ startSec, endSec, targetScale, easeSec });
+  }
+  if (!normalized.length) return "1";
+  normalized.sort((a, b) => a.startSec - b.startSec);
+
+  let expr = "1";
+  for (const z of normalized) {
+    const s = z.startSec.toFixed(3);
+    const e = z.endSec.toFixed(3);
+    const scale = z.targetScale.toFixed(4);
+    let segExpr = scale;
+    if (z.easeSec > 0.0005) {
+      const ei = (z.startSec + z.easeSec).toFixed(3);
+      const eo = (z.endSec - z.easeSec).toFixed(3);
+      const ease = z.easeSec.toFixed(3);
+      segExpr = [
+        `if(lt(t,${ei}),`,
+        `(1+(${scale}-1)*((t-${s})/${ease})),`,
+        `if(gt(t,${eo}),(1+(${scale}-1)*((${e}-t)/${ease})),${scale}))`,
+      ].join("");
+    }
+    expr = `if(between(t,${s},${e}),${segExpr},(${expr}))`;
+  }
+  return expr;
+}
+
+async function ffmpegArgsBackendExport(inputPath, outputPath, manifest, dims, tmpDir) {
+  const trimStartSec = Math.max(0, Number(manifest?.trimStartSec || 0));
+  const trimEndSecRaw = Number(manifest?.trimEndSec || 0);
+  const hasTrimEnd = Number.isFinite(trimEndSecRaw) && trimEndSecRaw > trimStartSec;
+  const trimDurationSec = hasTrimEnd ? Math.max(0, trimEndSecRaw - trimStartSec) : Number.POSITIVE_INFINITY;
+  const targetAspect = aspectRatioForPreset(String(manifest?.aspectPreset || "source"), dims.width, dims.height);
+  const sourceAspect = dims.width / Math.max(1, dims.height);
+  let cropFilter = "";
+  if (Math.abs(targetAspect - sourceAspect) > 0.0001) {
+    if (targetAspect > sourceAspect) {
+      cropFilter = `crop=iw:trunc(iw/${targetAspect}/2)*2:(iw-trunc(iw/${targetAspect}/2)*2)/2`;
+    } else {
+      cropFilter = `crop=trunc(ih*${targetAspect}/2)*2:ih:(iw-trunc(ih*${targetAspect}/2)*2)/2:0`;
+    }
+  }
+
+  const eventList = Array.isArray(manifest?.events) ? manifest.events : [];
+  const fpsRaw = Number(manifest?.renderFps || 0);
+  const targetFps = Number.isFinite(fpsRaw) && fpsRaw > 0
+    ? Math.max(1, Math.min(240, fpsRaw))
+    : 0;
+  const captureBounds = manifest?.captureBounds && typeof manifest.captureBounds === "object"
+    ? manifest.captureBounds
+    : null;
+  const cursorOffsetX = Number(manifest?.cursorOffsetX || 0);
+  const cursorOffsetY = Number(manifest?.cursorOffsetY || 0);
+  const cursorHotspotX = Number(manifest?.cursorHotspotX || 0);
+  const cursorHotspotY = Number(manifest?.cursorHotspotY || 0);
+  const cursorSize = 6;
+  const cursorHalf = Math.floor(cursorSize / 2);
+
+  const pointerKeyframes = [];
+  let lastAddedT = -1;
+  let lastAddedX = Number.NaN;
+  let lastAddedY = Number.NaN;
+  for (let i = 0; i < eventList.length; i += 1) {
+    const evt = eventList[i];
+    const type = String(evt?.type || "");
+    if (type !== "mouse_move" && type !== "mouse_down" && type !== "mouse_up") continue;
+    if (evt?.inFrame === false) continue;
+    const tSecAbs = Number(evt?.t || 0) / 1000;
+    const tSec = tSecAbs - trimStartSec;
+    if (tSec < 0 || tSec > trimDurationSec) continue;
+    const xr = eventRatioFromManifest(evt, "x", captureBounds);
+    const yr = eventRatioFromManifest(evt, "y", captureBounds);
+    if (xr == null || yr == null) continue;
+    const x = Math.max(0, Math.min(dims.width - 1, Math.round(xr * dims.width + cursorOffsetX)));
+    const y = Math.max(0, Math.min(dims.height - 1, Math.round(yr * dims.height + cursorOffsetY)));
+    if (pointerKeyframes.length > 0) {
+      const dt = Math.abs(tSec - lastAddedT);
+      const dx = Math.abs(x - lastAddedX);
+      const dy = Math.abs(y - lastAddedY);
+      if (dt < 0.033 && dx < 2 && dy < 2) continue;
+    }
+    pointerKeyframes.push({ tSec, x, y });
+    lastAddedT = tSec;
+    lastAddedX = x;
+    lastAddedY = y;
+    if (pointerKeyframes.length >= 1500) break;
+  }
+
+  const overlayFilters = [];
+  for (let i = 0; i < pointerKeyframes.length; i += 1) {
+    const kf = pointerKeyframes[i];
+    const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
+    if (!(nextT > kf.tSec)) continue;
+    const x = Math.max(0, kf.x - cursorHalf);
+    const y = Math.max(0, kf.y - cursorHalf);
+    overlayFilters.push(
+      `drawbox=x=${x}:y=${y}:w=${cursorSize}:h=${cursorSize}:color=white@0.95:t=fill:enable='between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)})'`
+    );
+  }
+
+  let clickCount = 0;
+  for (let i = 0; i < eventList.length; i += 1) {
+    const evt = eventList[i];
+    if (String(evt?.type || "") !== "mouse_down") continue;
+    if (evt?.inFrame === false) continue;
+    const tSecAbs = Number(evt?.t || 0) / 1000;
+    const tSec = tSecAbs - trimStartSec;
+    if (tSec < 0 || tSec > trimDurationSec) continue;
+    const xr = eventRatioFromManifest(evt, "x", captureBounds);
+    const yr = eventRatioFromManifest(evt, "y", captureBounds);
+    if (xr == null || yr == null) continue;
+    const x = Math.max(0, Math.min(dims.width - 1, Math.round(xr * dims.width + cursorOffsetX)));
+    const y = Math.max(0, Math.min(dims.height - 1, Math.round(yr * dims.height + cursorOffsetY)));
+    const burstSize = 22;
+    const burstHalf = Math.floor(burstSize / 2);
+    const bx = Math.max(0, x - burstHalf);
+    const by = Math.max(0, y - burstHalf);
+    const button = Number(evt?.button || 0);
+    const color = button === 2 ? "red@0.55" : button === 1 ? "yellow@0.55" : "lime@0.55";
+    const tEnd = Math.min(trimDurationSec, tSec + 0.16);
+    overlayFilters.push(
+      `drawbox=x=${bx}:y=${by}:w=${burstSize}:h=${burstSize}:color=${color}:t=2:enable='between(t,${tSec.toFixed(3)},${tEnd.toFixed(3)})'`
+    );
+    clickCount += 1;
+    if (clickCount >= 800) break;
+  }
+
+  const vfParts = [];
+  if (overlayFilters.length) vfParts.push(...overlayFilters);
+  const zoomScaleExpr = buildBackendZoomScaleExpr(manifest, trimStartSec, trimDurationSec);
+  if (zoomScaleExpr !== "1") {
+    vfParts.push(
+      `crop=w='trunc(iw/(${zoomScaleExpr})/2)*2':h='trunc(ih/(${zoomScaleExpr})/2)*2':x='(iw-ow)/2':y='(ih-oh)/2'`,
+      `scale=${Math.max(2, Math.round(Number(dims.width || 0)))}:${Math.max(2, Math.round(Number(dims.height || 0)))}`
+    );
+  }
+  if (cropFilter) vfParts.push(cropFilter);
+
+  const args = ["-y"];
+  if (trimStartSec > 0) {
+    args.push("-ss", trimStartSec.toFixed(3));
+  }
+  args.push("-i", inputPath);
+  let cursorImagePath = "";
+  const parsedCursor = parseDataUrlImage(manifest?.cursorTextureDataUrl);
+  if (parsedCursor && parsedCursor.buffer.length > 0) {
+    cursorImagePath = path.join(tmpDir, `cursor${extForMimeType(parsedCursor.mimeType)}`);
+    await fs.writeFile(cursorImagePath, parsedCursor.buffer);
+    args.push("-loop", "1", "-i", cursorImagePath);
+  }
+  if (hasTrimEnd) {
+    args.push("-to", trimEndSecRaw.toFixed(3));
+  }
+  if (vfParts.length || cursorImagePath) {
+    const baseChain = vfParts.length ? vfParts.join(",") : "null";
+    let graph = `[0:v]${baseChain}[basev]`;
+    if (cursorImagePath && pointerKeyframes.length > 0) {
+      let xExpr = "0";
+      let yExpr = "0";
+      for (let i = pointerKeyframes.length - 1; i >= 0; i -= 1) {
+        const kf = pointerKeyframes[i];
+        const nextT = i + 1 < pointerKeyframes.length ? pointerKeyframes[i + 1].tSec : trimDurationSec;
+        const x = Math.max(0, Math.round(kf.x - cursorHotspotX));
+        const y = Math.max(0, Math.round(kf.y - cursorHotspotY));
+        xExpr = `if(between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)}),${x},(${xExpr}))`;
+        yExpr = `if(between(t,${kf.tSec.toFixed(3)},${nextT.toFixed(3)}),${y},(${yExpr}))`;
+      }
+      graph += `;[1:v]format=rgba[cursorv];[basev][cursorv]overlay=x='${xExpr}':y='${yExpr}':eval=frame[vout]`;
+    } else {
+      graph += ";[basev]copy[vout]";
+    }
+    const filterScriptPath = path.join(tmpDir, "backend-filter-complex.ffscript");
+    await fs.writeFile(filterScriptPath, graph, "utf8");
+    args.push("-filter_complex_script", filterScriptPath, "-map", "[vout]");
+    args.push("-map", "0:a?");
+  } else {
+    args.push("-map", "0:v:0", "-map", "0:a?");
+  }
+  if (targetFps > 0) {
+    args.push("-r", String(targetFps), "-vsync", "cfr");
+  }
+  args.push(
+    "-c:v",
+    "libx264",
+    "-preset",
+    "superfast",
+    "-tune",
+    "zerolatency",
+    "-x264-params",
+    "bframes=0:rc-lookahead=0:sync-lookahead=0",
+    "-crf",
+    "18",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "160k",
+    outputPath
+  );
+  return args;
+}
+
 async function verifyFfmpegAvailable() {
   await new Promise((resolve, reject) => {
     const p = spawn("ffmpeg", ["-version"], { windowsHide: true });
@@ -1695,6 +2045,56 @@ async function verifyFfmpegAvailable() {
     p.once("exit", (code) => {
       if (code === 0) resolve();
       else reject(new Error("ffmpeg is not available on PATH"));
+    });
+  });
+}
+
+async function runFfmpegWithRenderWorker(args, onProgress = null, timeoutMs = 60 * 60 * 1000, workerPayload = null) {
+  return await new Promise((resolve, reject) => {
+    const workerPath = path.join(__dirname, "render-worker.js");
+    const worker = fork(workerPath, [], { windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        worker.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      reject(new Error("Backend render worker timed out"));
+    }, Math.max(1000, Number(timeoutMs || 0)));
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    };
+    worker.once("error", (err) => finish(err));
+    worker.on("message", (msg) => {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "progress") {
+        if (onProgress) onProgress(msg);
+        return;
+      }
+      if (msg.type === "done") {
+        finish();
+        return;
+      }
+      if (msg.type === "error") {
+        finish(new Error(String(msg.error || "Backend render worker failed")));
+      }
+    });
+    worker.once("exit", (code, signal) => {
+      if (done) return;
+      if (code === 0) finish();
+      else finish(new Error(`Backend render worker exited (code=${code}, signal=${signal || "none"})`));
+    });
+    worker.send({
+      type: "start",
+      args,
+      payload: workerPayload && typeof workerPayload === "object" ? workerPayload : null,
     });
   });
 }
